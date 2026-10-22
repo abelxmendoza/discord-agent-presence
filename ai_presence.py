@@ -79,8 +79,11 @@ DEFAULT_CONFIG = {
     # `agent-presence web setup`.
     # Private by default: only public GitHub repos are named, OS shows its
     # major version, times are rounded to the day. `share` picks which
-    # highlights from your private habit log go on it.
+    # highlights from your private habit log go on it. With a link key, `relay`
+    # also shares your card with linked computers on other networks through
+    # the repo (encrypted with the link key); only one computer publishes.
     "web": {"enabled": False, "repo": "", "branch": "agent-presence-status", "name": "",
+            "relay": True,
             "live": True, "show_tokens": False, "show_files": False, "show_machines": True,
             "share": ["streak", "best_streak", "week_hours", "week_commits", "month_commits",
                       "active_days", "top_project", "tests"],
@@ -1501,8 +1504,9 @@ def build_activity(cfg, tool, s, totals, streak, tick, machines=None, switched=N
 # ------------------------------------------------------- machines ----
 # Which computer this is, how long since you touched it, and (with a link
 # key) what your other computers are doing. Linked machines share a small
-# status packet over the local network; the one you used most recently
-# shows the card, with every machine's agents on it.
+# status packet over the local network (and, with a web repo, an encrypted
+# copy through GitHub for computers on other networks); the one you used most
+# recently shows the card, with every machine's agents on it.
 
 MAC_OS_NAMES = {26: "Tahoe", 15: "Sequoia", 14: "Sonoma", 13: "Ventura", 12: "Monterey", 11: "Big Sur"}
 JUNK_MODELS = {"", "to be filled by o.e.m.", "system product name", "default string",
@@ -1512,6 +1516,9 @@ LINK_PORT = 47777
 PEER_TTL = 20            # seconds a peer stays known without a packet
 IN_USE_SECONDS = 120     # touched this recently = "in use"
 SWITCH_MARGIN = 15       # hysteresis before the card moves to another machine
+RELAY_PREFIX = "agent-presence-peer-"  # one branch per computer in the web repo
+RELAY_SECONDS = 30       # how often the relay writes this computer's packet
+RELAY_TTL = 150          # a relayed packet older than this is ignored
 _machine = {}
 
 
@@ -1690,6 +1697,7 @@ def machine_status(cfg, live):
     return {"v": 1, "id": m["id"], "name": cfg.get("machine_name") or "", "model": m["model"],
             "chip": m["chip"], "kind": m["kind"], "os": m["os"], "os_full": m["os_full"],
             "idle": None if idle is None else round(idle, 1), "discord": discord_running(),
+            "web": bool(web_cfg(cfg)["enabled"] and web_cfg(cfg)["repo"]),
             "agents": agents[:12], "tools": tools}
 
 
@@ -1751,12 +1759,111 @@ class Link:
         return [p for _, p in self.peers.values()]
 
 
-def pick_leader(me, peers, current=None):
+def relay_wanted(cfg):
+    w = web_cfg(cfg)
+    return bool(cfg["link_key"] and w["enabled"] and w["repo"] and w["relay"])
+
+
+class Relay:
+    """Shares machine_status() with your linked computers on other networks,
+    through the web repo. Each computer keeps one file on its own
+    agent-presence-peer-<id> branch, encrypted and signed with the link key, so
+    the public repo shows nothing readable and nobody else can post to it."""
+
+    def __init__(self, key, cfg):
+        import hashlib
+        import threading
+        self.enc = hashlib.sha256(b"agent-presence relay enc:" + key.encode()).digest()
+        self.mac = hashlib.sha256(b"agent-presence relay mac:" + key.encode()).digest()
+        self.cfg, self.repo = cfg, web_cfg(cfg)["repo"]
+        self.peers = {}  # id -> packet
+        self.seen = {}   # branch -> commit already read
+        self.last_at, self.busy = 0, threading.Lock()
+        self.thread_cls = threading.Thread
+
+    def _stream(self, nonce, n):
+        import hmac
+        out = bytearray()
+        i = 0
+        while len(out) < n:
+            out += hmac.new(self.enc, nonce + i.to_bytes(8, "big"), "sha256").digest()
+            i += 1
+        return bytes(out[:n])
+
+    def seal(self, packet):
+        import base64
+        import hmac
+        body = json.dumps({**packet, "t": round(time.time(), 1)}, separators=(",", ":")).encode()
+        nonce = os.urandom(16)
+        ct = bytes(a ^ b for a, b in zip(body, self._stream(nonce, len(body))))
+        tag = hmac.new(self.mac, nonce + ct, "sha256").digest()
+        return base64.b64encode(tag + nonce + ct).decode()
+
+    def open(self, text):
+        import base64
+        import binascii
+        import hmac
+        try:
+            raw = base64.b64decode(text.strip(), validate=True)
+        except (binascii.Error, ValueError):
+            return None
+        tag, nonce, ct = raw[:32], raw[32:48], raw[48:]
+        if len(raw) < 48 or not hmac.compare_digest(
+                tag, hmac.new(self.mac, nonce + ct, "sha256").digest()):
+            return None
+        try:
+            pkt = json.loads(bytes(a ^ b for a, b in zip(ct, self._stream(nonce, len(ct)))))
+        except ValueError:
+            return None
+        return pkt if isinstance(pkt, dict) and pkt.get("id") else None
+
+    def sync(self, me, token):
+        """Write this computer's packet, then read the others' (blocking)."""
+        import base64
+        publish_files(token, self.repo, RELAY_PREFIX + me["id"], {"peer.txt": self.seal(me) + "\n"})
+        refs = github_call(token, "GET", f"/repos/{self.repo}/git/matching-refs/heads/{RELAY_PREFIX}")
+        for ref in refs:
+            branch, sha = ref["ref"][len("refs/heads/"):], ref["object"]["sha"]
+            if branch == RELAY_PREFIX + me["id"] or self.seen.get(branch) == sha:
+                continue
+            got = github_call(token, "GET", f"/repos/{self.repo}/contents/peer.txt?ref={sha}")
+            self.seen[branch] = sha
+            pkt = self.open(base64.b64decode(got.get("content", "")).decode("ascii", "replace"))
+            if pkt and pkt["id"] != me["id"]:
+                self.peers[pkt["id"]] = pkt
+
+    def update(self, me):
+        """sync() in the background, at most every RELAY_SECONDS."""
+        if time.time() - self.last_at < RELAY_SECONDS or not self.busy.acquire(blocking=False):
+            return
+        self.last_at = time.time()
+
+        def go():
+            try:
+                token = github_token(self.cfg)
+                if token:
+                    self.sync(me, token)
+                else:
+                    log("relay: no GitHub token; run `agent-presence web setup`")
+            except Exception as e:
+                log("relay: sync failed:", repr(e))
+            finally:
+                self.busy.release()
+        self.thread_cls(target=go, daemon=True).start()
+
+    def receive(self, my_id):
+        now = time.time()
+        return [p for p in list(self.peers.values())
+                if p["id"] != my_id and now - p.get("t", 0) < RELAY_TTL]
+
+
+def pick_leader(me, peers, current=None, need="discord"):
     """ID of the machine that should show the card: the one you touched most
-    recently, among machines with Discord open. Sticks with the current one
-    until another is clearly more recent, so it doesn't flicker."""
+    recently, among machines with Discord open (or, with need="web", among
+    machines that publish the web card). Sticks with the current one until
+    another is clearly more recent, so it doesn't flicker."""
     every = [me] + list(peers)
-    able = [p for p in every if p.get("discord")] or [me]
+    able = [p for p in every if p.get(need)] or [me]
 
     def idle(p):
         return p["idle"] if p.get("idle") is not None else 3600
@@ -2697,18 +2804,22 @@ def main():
         def stop(*_):
             raise SystemExit(0)
         signal.signal(signal.SIGTERM, stop)
+    relay = None
+    if relay_wanted(cfg):
+        relay = Relay(cfg["link_key"], cfg)
+        log(f"linked: relaying through {relay.repo} for your computers on other networks")
     try:
-        _loop(cfg, conns, link, web)
+        _loop(cfg, conns, link, web, relay)
     finally:
-        if web and leader_is_me.get("v", True):  # logging out / shutting down
+        if web and leader_is_me.get("web", True):  # logging out / shutting down
             web.publish(web_status(cfg, {}, state="offline"))
 
 
 leader_is_me = {}
 
 
-def _loop(cfg, conns, link, web):
-    leader, switched_at, switched_from = None, 0, None
+def _loop(cfg, conns, link, web, relay=None):
+    leader, web_leader, switched_at, switched_from = None, None, 0, None
     habits = Habits()
     while True:
         tick = int(time.time() // cfg["rotate_seconds"])
@@ -2723,6 +2834,10 @@ def _loop(cfg, conns, link, web):
             if link:
                 link.send(me)
                 peers = link.receive(me["id"])
+            if relay:  # computers on other networks; the local packet wins when both arrive
+                relay.update(me)
+                near = {p["id"] for p in peers}
+                peers += [p for p in relay.receive(me["id"]) if p["id"] not in near]
             new_leader = pick_leader(me, peers, leader)
             if new_leader != leader:
                 if leader and new_leader == me["id"]:
@@ -2730,17 +2845,21 @@ def _loop(cfg, conns, link, web):
                 log("card is on", "this computer" if new_leader == me["id"] else
                     next((p.get("name") or p["model"] for p in peers if p["id"] == new_leader), "?"))
                 leader = new_leader
-            leader_is_me["v"] = leader == me["id"]
-            if leader != me["id"]:
-                acts, cards = {}, {}  # another computer shows the card
-            else:
+            # One computer publishes the web card: the one you're using, among those
+            # set up to publish, even when another one shows the Discord card.
+            web_leader = pick_leader(me, peers, web_leader, need="web")
+            publish = bool(web) and web_leader == me["id"]
+            leader_is_me["v"], leader_is_me["web"] = leader == me["id"], publish
+            acts, cards = {}, {}  # unless this computer shows the card
+            if leader == me["id"] or publish:
                 machines = machines_summary(me, peers, cfg)
                 here = next(m["label"] for m in machines if m["me"])
                 switched = here if time.time() - switched_at < 120 and switched_from else None
                 live = merge_peers(live, peers)
-                acts, cards = activities(cfg, tick, live, set(conns) - {"combined"},
-                                         machines, switched)
-                if web:
+                if leader == me["id"]:
+                    acts, cards = activities(cfg, tick, live, set(conns) - {"combined"},
+                                             machines, switched)
+                if publish:
                     roots = {r for st in live.values() for p, r in st["roots"].items()
                              if p not in cfg["hide_projects"]}
                     web.update(web_status(cfg, live, machines, update_streak(bool(live), roots)
@@ -2989,8 +3108,10 @@ def cmd_link(key=None, off=False):
     else:
         cfg["link_key"] = secrets.token_urlsafe(12)
         print(f"Made a link key for your computers:\n\n    {cfg['link_key']}\n\n"
-              "On each of your other computers (same Wi-Fi or network), run:\n"
+              "On each of your other computers, run:\n"
               f"    agent-presence link {cfg['link_key']}\n\n"
+              "Computers on the same network find each other. On different networks,\n"
+              "run `agent-presence web setup` with the same repo on each of them too.\n\n"
               "Keep it private: anyone on your network with it could post to your card.")
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
     print("\nRestart to apply:  agent-presence setup")
@@ -3020,6 +3141,16 @@ def cmd_machines(listen=8):
         time.sleep(1)
         link.receive(me["id"])
     peers = [p for _, p in link.peers.values()]
+    if relay_wanted(cfg):
+        print(f"Checking {web_cfg(cfg)['repo']} for your computers on other networks…")
+        relay, token = Relay(cfg["link_key"], cfg), github_token(cfg)
+        try:
+            if token:
+                relay.sync(me, token)
+        except Exception as e:
+            print(f"  relay check failed: {e}")
+        near = {p["id"] for p in peers}
+        peers += [p for p in relay.receive(me["id"]) if p["id"] not in near]
     for p in peers:
         idle = p.get("idle")
         print(f"  {machine_icon(p)} {p.get('name') or p['model']} · {p.get('os_full', '')} · "
@@ -3027,10 +3158,15 @@ def cmd_machines(listen=8):
               f" · Discord {'open' if p.get('discord') else 'closed'} · {plural(len(p.get('agents', [])), 'agent')}")
     if not peers:
         print("  none found. Check the other computer is linked with the same key, on the same"
-              " network, and that its firewall allows UDP 47777.")
-    lead = pick_leader(me, peers)
-    print("\nThe card shows on: " + ("this computer" if lead == me["id"] else
-                                  next(p.get("name") or p["model"] for p in peers if p["id"] == lead)))
+              " network, and that its firewall allows UDP 47777 (or, on another network,"
+              " that both ran `agent-presence web setup` with the same repo).")
+
+    def name(mid):
+        return "this computer" if mid == me["id"] else \
+            next(p.get("name") or p["model"] for p in peers if p["id"] == mid)
+    print("\nThe card shows on: " + name(pick_leader(me, peers)))
+    if any(p.get("web") for p in [me] + peers):
+        print("The web card is published by: " + name(pick_leader(me, peers, need="web")))
 
 
 def cmd_web(action, repo=None, name=None, token=None, readme=False, yes=False):
