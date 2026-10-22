@@ -147,18 +147,50 @@ end moreMenu
 -- README card and the website widget. Linked computers' agents are included.
 on setUpWeb(core, myIcon)
 	set msg to "Show what you're coding on your GitHub profile README and your website, updated every couple of minutes." & return & return & ¬
-		"It uses your GitHub CLI login (gh auth login) to keep a status branch in your profile repo. Private repos are never named." & return & return & ¬
+		"It keeps a status branch in your profile repo. Private repos are never named." & return & return & ¬
 		"Also add the card to your profile README? (One commit; skip it if you'll add it yourself.)"
 	set r to display dialog msg with title appTitle buttons {"Cancel", "Status Only", "Add to README"} default button "Add to README" cancel button "Cancel" with icon myIcon
 	set extra to ""
 	if button returned of r is "Add to README" then set extra to " --readme"
+	set tok to my askToken(myIcon)
+	if tok is not "" then
+		-- Hand the token over in a file in your private temp folder, so it never
+		-- shows in the process list. The tool deletes the file after reading it.
+		set tokPath to POSIX path of (path to temporary items from user domain) & "agent-presence-token"
+		set fh to open for access POSIX file tokPath with write permission
+		set eof fh to 0
+		write tok to fh as «class utf8»
+		close access fh
+		set extra to extra & " --token-file " & quoted form of tokPath
+	end if
 	try
 		do shell script core & " web" & extra
 	on error errMsg
-		my failed(errMsg & return & return & "Install the GitHub CLI (brew install gh) and run gh auth login in Terminal, then try again.", myIcon)
+		do shell script "rm -f " & quoted form of (POSIX path of (path to temporary items from user domain) & "agent-presence-token")
+		my failed(errMsg & return & return & "Check that the token can write to your profile repo (Contents: Read and write), then try again.", myIcon)
 	end try
 	display dialog "Publishing. Your GitHub card and website widget update within a couple of minutes, with the agents from all your linked computers." with title appTitle buttons {"Done"} default button "Done" with icon myIcon
 end setUpWeb
+
+-- A fine-grained token that can only write your profile repo, or "" to use
+-- the GitHub CLI login after a warning.
+on askToken(myIcon)
+	set msg to "Paste a GitHub token that can only write your profile repo:" & return & return & ¬
+		"1. Click Get a Token (opens GitHub)." & return & ¬
+		"2. Repository access: Only select repositories → your profile repo (the one named after you)." & return & ¬
+		"3. Permissions: Contents → Read and write. Generate, copy, paste here."
+	repeat
+		set r to display dialog msg default answer "" with hidden answer with title appTitle buttons {"Cancel", "Get a Token…", "Continue"} default button "Continue" cancel button "Cancel" with icon myIcon
+		if button returned of r is "Get a Token…" then
+			open location "https://github.com/settings/personal-access-tokens/new"
+		else
+			set tok to text returned of r
+			if tok is not "" then return tok
+			display dialog "Use your GitHub CLI login instead? It can write to all of your repos, and the app keeps using it in the background." with title appTitle buttons {"Back", "Use CLI Login"} default button "Back" with icon caution
+			if button returned of result is "Use CLI Login" then return ""
+		end if
+	end repeat
+end askToken
 
 on linkComputers(core, myIcon)
 	set msg to "Linked computers share one Discord card and one GitHub status, showing every computer's agents. On different networks, also turn on " & quote & webChoice & quote & " on each." & return & return & ¬
