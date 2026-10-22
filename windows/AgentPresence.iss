@@ -109,11 +109,14 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var
   Old: string;
 begin
-  // A PowerShell (install.ps1) install put its own agent-presence.cmd on PATH
-  // first; point it here so both names run this copy.
-  Old := ExpandConstant('{localappdata}\discord-agent-presence\agent-presence.cmd');
-  if (CurStep = ssPostInstall) and FileExists(Old) then
-    SaveStringToFile(Old, '@"' + ExpandConstant('{app}\agent-presence.cmd') + '" %*' + #13#10, False);
+  // A PowerShell (install.ps1) install sits earlier on PATH and would shadow
+  // this one. Setup already took over its startup entry, so remove the rest.
+  Old := ExpandConstant('{localappdata}\discord-agent-presence');
+  if (CurStep = ssPostInstall) and FileExists(Old + '\agent-presence.cmd') then
+  begin
+    DelTree(Old, True, True, True);
+    RemovePath(Old);
+  end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

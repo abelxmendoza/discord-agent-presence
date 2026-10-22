@@ -71,7 +71,15 @@ jobs:
           }
           function Running { @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'ai_presence\.py"? run' }) }
 
+          # Pretend an older PowerShell (install.ps1) install is on PATH.
+          $legacy = "$env:LOCALAPPDATA\discord-agent-presence"
+          New-Item -ItemType Directory -Force $legacy | Out-Null
+          Set-Content "$legacy\agent-presence.cmd" "@echo legacy"
+          [Environment]::SetEnvironmentVariable("Path", ([Environment]::GetEnvironmentVariable("Path", "User") + ";$legacy"), "User")
+
           Install install.log
+          if (Test-Path $legacy) { throw "old PowerShell install left behind" }
+          if (([Environment]::GetEnvironmentVariable("Path", "User") -split ";") -contains $legacy) { throw "old PATH entry left behind" }
           & "$app\agent-presence.cmd" --help; if ($LASTEXITCODE) { throw "--help failed" }
           & "$app\agent-presence.cmd" doctor; if ($LASTEXITCODE) { throw "doctor failed" }
           if (-not (Test-Path $vbs)) { throw "no startup entry" }
