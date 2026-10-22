@@ -1117,7 +1117,7 @@ def milestones(cfg, s, streak):
         slug = github_slug(r)
         if not slug or not github_public(slug):
             continue
-        pulls = cached(CACHE, ("pulls", slug), 300, lambda: gh_api(
+        pulls = cached(CACHE, ("pulls", slug), 300, lambda slug=slug: gh_api(
             f"/repos/{slug}/pulls?state=closed&sort=updated&direction=desc&per_page=10")) or []
         for pr in pulls if isinstance(pulls, list) else []:
             t = iso_time(pr.get("merged_at")) if pr.get("merged_at") else None
@@ -1143,7 +1143,7 @@ def snapshot(cfg):
                 s["roots"][name] = root
 
     # App launch time = oldest process of that app whose parent isn't the same app.
-    for pid, (comm, ppid, start, exe) in procs.items():
+    for comm, ppid, start, exe in procs.values():
         tool = app_tool(comm, exe)
         if tool and procs.get(ppid, ("",))[0] != comm:
             rs = state[tool]["running_since"]
@@ -1879,7 +1879,7 @@ WantedBy=graphical-session.target
         pyw = Path(py).with_name("pythonw.exe")
         pyw = str(pyw) if pyw.exists() else py
         target, body = WIN_STARTUP, (
-            'CreateObject("WScript.Shell").Run """{}"" ""{}"" run", 0, False\r\n'.format(pyw, SCRIPT))
+            f'CreateObject("WScript.Shell").Run """{pyw}"" ""{SCRIPT}"" run", 0, False\r\n')
     if dry_run:
         print(f"would write {target}:\n{body}")
         return

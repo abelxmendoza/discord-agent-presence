@@ -1,26 +1,19 @@
 # images
 
-Card art loaded straight from this folder by URL. Any missing file is skipped,
-so it's fine to add these a few at a time. Square images; `.jpg` is tried first,
-then `.png`. Discord shows them at about 100 px, so 512×512 is plenty.
-See [../IMAGE_PROMPTS.md](../IMAGE_PROMPTS.md) for the generation prompt.
+Card art, loaded by URL from this folder (`.jpg` first, then `.png`). Missing
+files are skipped. See [../IMAGE_PROMPTS.md](../IMAGE_PROMPTS.md) to make new art.
 
-Done so far: `claude` (all eight moods, incl. `push` and `sim`), `chatgpt` (hand-made
-cooking / waiting / idle), and generated sets for every other tool.
-`tools/make_tool_art.py` builds a tool's set from the Claude art: it swaps the
-laptop logo for a neon glyph and recolours the cooking image. Hand-made art
-for any tool simply replaces those files. Also `hero.png` for the README.
+**Big picture:** `<tool>_<mood>` for every tool (`claude` `chatgpt` `gemini`
+`grok` `muse` `copilot` `opencode` `aider` `cursor` `windsurf` `kiro` `vscode`)
+and mood (`cooking` `waiting` `success` `failed` `idle` `crew` `push` `sim`).
+Claude's set and ChatGPT's cooking / waiting / idle are hand-made; the rest come
+from `tools/make_tool_art.py`. All tools share `claude_sim`. `hero.png` is the
+README banner.
 
-**Big picture** (app × mood): `<app>_cooking`, `_waiting`, `_idle`, plus optional
-`_success` (tests/build just passed), `_failed` (failing tests/build or red CI) and
-`_crew` (3+ busy agents), `_push` (pushing / just pushed) and `_sim` (simulator running). A missing optional mood falls back to cooking/waiting,
-then `<app>.png`, then `logo.png`. Apps: `claude` `chatgpt` `grok` `gemini` `muse` `copilot` `opencode` `aider`
-`cursor` `windsurf` `kiro` `vscode`.
-
-**Small badge** (follows the rotating line):
+**Small badge** (not made yet; the card leaves the badge off until they exist):
 - agent count: `agents_1` … `agents_9` (9 = 9+)
 - actions: `act_edit` `act_read` `act_search` `act_web` `act_subagent` `act_browser`
   `act_test` `act_build` `act_commit` `act_push` `act_sim` `act_shell`
   `act_working` `act_thinking` `act_waiting`
-- `git` · `streak` · `streak_big` (7+ days) · `model_claude` · `model_gpt` · `model_gemini` · `model_muse` · `model_grok`
-- CI: `ci_green` `ci_fail` `ci_running`
+- `git` `streak` `streak_big` `ci_green` `ci_fail` `ci_running`
+- `model_claude` `model_gpt` `model_gemini` `model_muse` `model_grok`
