@@ -35,8 +35,13 @@ jobs:
       APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.TAG || github.ref }}
+      # Packaging comes from this branch; the app itself from the release tag,
+      # so older tags (made before packaging/ existed) can still be built.
+      - name: Use the release's app files
+        if: env.TAG != ''
+        run: |
+          git fetch --depth 1 origin "refs/tags/$TAG:refs/tags/$TAG"
+          git checkout "$TAG" -- ai_presence.py pyproject.toml LICENSE
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
