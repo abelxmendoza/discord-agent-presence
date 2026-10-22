@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to attach the .dmg to (e.g. v0.8.1). Blank = build only."
+        description: "Release tag (e.g. v0.9.0). Created with its notes if new; the .dmg is attached. Blank = build only."
         required: false
 
 permissions:
@@ -58,15 +58,16 @@ jobs:
           name: AgentPresence-macOS
           path: dist/AgentPresence-macOS.dmg
 
-      # Pushing a v* tag publishes the release (notes from
-      # .github/release-notes/<tag>.md) with the .dmg attached.
-      - name: Create release for a pushed tag
-        if: startsWith(github.ref, 'refs/tags/v')
+      # Pushing a v* tag, or running this workflow by hand with a tag, publishes
+      # the release (notes from .github/release-notes/<tag>.md) with the .dmg.
+      # Run manually with a new tag and it's created at this commit.
+      - name: Create the release if it doesn't exist
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --verify-tag --latest \
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --target "$GITHUB_SHA" --latest \
             --title "$(head -1 ".github/release-notes/$TAG.title" 2>/dev/null || echo "$TAG")" \
             --notes-file ".github/release-notes/$TAG.md"
 
