@@ -17,6 +17,7 @@ import struct
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 import uuid
 from datetime import date, timedelta
@@ -73,6 +74,11 @@ DEFAULT_CONFIG = {
     # Same key on each of your computers = they share one card that follows
     # whichever one you're using. Set with `agent-presence link`.
     "link_key": "",
+    # Publish what you're doing to GitHub for a README card and a website
+    # widget, with more detail than Discord shows. Set up with
+    # `agent-presence web setup`.
+    "web": {"enabled": False, "repo": "", "branch": "agent-presence-status", "name": "",
+            "show_tokens": True, "show_files": False, "every_seconds": 120, "token": ""},
     # Big picture switches to <app>_failed / <app>_success after a test or
     # build run, for this long.
     "failed_mood_seconds": 900,
@@ -222,6 +228,7 @@ def load_config():
             user.pop(old, None)  # from earlier versions
         cfg.update(user)
         cfg["client_ids"] = {**DEFAULT_CONFIG["client_ids"], **user.get("client_ids", {})}
+        cfg["web"] = {**DEFAULT_CONFIG["web"], **user.get("web", {})}
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
     return cfg
@@ -236,10 +243,10 @@ def cached(store, key, ttl, fn):
     return val
 
 
-def run(*cmd, cwd=None):
+def run(*cmd, cwd=None, timeout=5):
     try:
         return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
-                              timeout=5).stdout.strip()
+                              timeout=timeout).stdout.strip()
     except Exception:
         return ""
 
@@ -1523,7 +1530,7 @@ def machine_info():
     import platform
     if IS_MAC:
         try:
-            hw = json.loads(run("system_profiler", "-json", "SPHardwareDataType") or "{}")
+            hw = json.loads(run("system_profiler", "-json", "SPHardwareDataType", timeout=20) or "{}")
             hw = (hw.get("SPHardwareDataType") or [{}])[0]
         except ValueError:
             hw = {}
@@ -1562,7 +1569,7 @@ def machine_info():
         os_full = f"{os_short} (build {build})"
         out = run("powershell", "-NoProfile", "-Command",
                   "$c = Get-CimInstance Win32_ComputerSystem; "
-                  "\"$($c.Manufacturer)|$($c.Model)|$($c.PCSystemType)\"")
+                  "\"$($c.Manufacturer)|$($c.Model)|$($c.PCSystemType)\"", timeout=20)
         parts = (out or "").split("|")
         if len(parts) == 3:
             vendor, name = _clean_model(parts[0]), _clean_model(parts[1])
@@ -1820,6 +1827,289 @@ def machine_lines(cfg, machines, switched=None):
     return lines
 
 
+# ------------------------------------------------------------- web ----
+# The same activity, with more detail than Discord has room for, published
+# to your GitHub so a README card and your website can show it. Two files go
+# to a side branch of one of your repos (your profile repo by default):
+#   status.json  everything, for a website widget
+#   status.svg   an image card for a README
+# Each update replaces the branch with a single new commit, so there's no
+# history to pile up, and commits off the default branch don't count toward
+# your contribution graph.
+
+WEB_BRANCH = "agent-presence-status"
+WEB_RAW = "https://raw.githubusercontent.com/{repo}/{branch}/{file}"
+WEB_STATE = STATE_DIR / "web.json"
+STATE_WORDS = {"vibe-coding": "vibe coding", "coding": "coding", "idle": "not coding right now",
+               "offline": "offline"}
+
+
+def web_cfg(cfg):
+    return {**DEFAULT_CONFIG["web"], **(cfg.get("web") or {})}
+
+
+def find_gh():
+    import shutil
+    hit = shutil.which("gh")
+    if hit:
+        return hit
+    for p in ("/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh", "/snap/bin/gh",
+              os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "GitHub CLI", "gh.exe")):
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def github_token(cfg):
+    """A token that can write the status branch: env var, config, or the GitHub CLI's."""
+    tok = os.environ.get("AGENT_PRESENCE_TOKEN") or web_cfg(cfg).get("token")
+    if tok:
+        return tok.strip()
+    gh = find_gh()
+    return (run(gh, "auth", "token") or "").strip() or None if gh else None
+
+
+def github_call(token, method, path, body=None, timeout=15):
+    req = urllib.request.Request(
+        "https://api.github.com" + path, method=method,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+                 "User-Agent": "agent-presence", "X-GitHub-Api-Version": "2022-11-28"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        data = r.read()
+        return json.loads(data) if data else {}
+
+
+def publish_files(token, repo, branch, files):
+    """Point `branch` at one new parentless commit holding `files`."""
+    tree = github_call(token, "POST", f"/repos/{repo}/git/trees", {"tree": [
+        {"path": name, "mode": "100644", "type": "blob", "content": content}
+        for name, content in files.items()]})
+    commit = github_call(token, "POST", f"/repos/{repo}/git/commits", {
+        "message": "agent-presence status", "tree": tree["sha"], "parents": []})
+    try:
+        github_call(token, "PATCH", f"/repos/{repo}/git/refs/heads/{branch}",
+                    {"sha": commit["sha"], "force": True})
+    except urllib.error.HTTPError as e:
+        if e.code not in (404, 422):
+            raise
+        github_call(token, "POST", f"/repos/{repo}/git/refs",
+                    {"ref": f"refs/heads/{branch}", "sha": commit["sha"]})
+
+
+def strip_file(action):
+    """"✍ editing foo.py" -> "✍ editing" (file names stay off the web unless asked)."""
+    return re.sub(r"\s+\S*\.[A-Za-z0-9]{1,8}$", "", action)
+
+
+def web_status(cfg, live, machines=None, streak=0, state=None):
+    """Everything the README card and website widget show, as a dict."""
+    w, now = web_cfg(cfg), time.time()
+    hidden = set(cfg["hide_projects"])
+    try:
+        saved = json.loads(WEB_STATE.read_text())
+    except (OSError, ValueError):
+        saved = {}
+    out = {"v": 1, "updated": int(now), "name": w["name"], "tool": None, "tools": [],
+           "verb": None, "title": None, "headline": None, "mood": "idle", "image": None,
+           "since": None, "agents": [], "projects": [], "machines": machines or [],
+           "today": {}, "streak": streak, "model": None, "lines": [],
+           "last_active": saved.get("last_active"),
+           "landing": LANDING_URL}
+    if not live or state == "offline":
+        out["state"] = state or "idle"
+        return out
+    primary, s = merge_states(live)
+    lines = card_lines(cfg, primary, s, streak, machines)[0]
+    busy = [a for a in s["agents"] if a["status"] == "busy"]
+    out["state"] = "vibe-coding" if busy else "coding" if s["focused"] or s["agents"] else "idle"
+    out["last_active"] = int(now) if out["state"] != "idle" else out["last_active"]
+    m = mood(s, cfg)
+    out.update(tool=primary, tools=[{"id": t, "name": TOOL_NAMES[t].split(" ·")[0]} for t in s["tools"]],
+               verb="Watching" if busy and not s["focused"] else "Playing",
+               title="Vibe Coding" if pick_name(cfg, s, 2) else "Coding", mood=m,
+               image=image(cfg, f"{primary}_{m}", f"{primary}_{MOOD_FALLBACK.get(m, m)}", primary),
+               since=int(s["running_since"]),
+               headline=lines[0]["text"] if lines else None,
+               lines=[ln["text"] for ln in lines])
+    for a in sorted(s["agents"], key=lambda a: (a["status"] != "busy", -a["mtime"]))[:10]:
+        proj = a.get("project")
+        out["agents"].append({
+            "tool": a["tool"], "tool_name": TOOL_NAMES[a["tool"]].split(" ·")[0],
+            "status": a["status"],
+            "action": a["action"] if w["show_files"] else strip_file(a["action"]),
+            "project": None if proj in hidden else proj, "model": pretty_model(a["model"]) if a.get("model") else None,
+            "machine": a.get("machine")})
+    models = [a["model"] for a in s["agents"] if a.get("model")]
+    out["model"] = pretty_model(max(set(models), key=models.count)) if models else None
+    for p in s["projects"][:6]:
+        if p in hidden:
+            continue
+        root = s["roots"].get(p)
+        g = git_stats(root) if root else None
+        slug = github_slug(root) if root else None
+        public = bool(slug and github_public(slug))
+        out["projects"].append({
+            "name": p, "branch": g["branch"] if g else None,
+            "added": g["added"] if g else 0, "removed": g["removed"] if g else 0,
+            "commits_today": g["commits_today"] if g else 0,
+            "url": f"https://github.com/{slug}" if public else None,
+            "ci": ci_status(slug, g["branch"]) if public and g and g["branch"] else None})
+    stats = today_stats()
+    secs = sum(v[0] for v in stats.values())
+    out["today"] = {"agent_seconds": int(secs), "commits": sum(p["commits_today"] for p in out["projects"])}
+    if w["show_tokens"]:
+        out["today"]["tokens"] = sum(v[1] for v in stats.values())
+    return out
+
+
+def _x(s):
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace('"', "&quot;"))
+
+
+def _when(ts):
+    t = time.localtime(ts)
+    zone = time.strftime("%Z", t)
+    if " " in zone:  # Windows gives "Pacific Daylight Time"
+        zone = "".join(w[0] for w in zone.split())
+    clock = time.strftime("%I:%M %p", t).lstrip("0")
+    day = "" if time.strftime("%Y%m%d", t) == time.strftime("%Y%m%d") else time.strftime("%b %d, ", t)
+    return f"{day}{clock} {zone}".strip()
+
+
+def render_svg(st):
+    """A README card: dark, 480 px wide, height fits the content."""
+    W, pad, lh = 480, 20, 22
+    rows = []  # (kind, text)
+    name = st.get("name") or "I'm"
+    live = st["state"] in ("vibe-coding", "coding")
+    head = f"{name} {'is' if st.get('name') else ''} {STATE_WORDS[st['state']]}".replace("  ", " ")
+    if live and st.get("title"):
+        sub = " · ".join(filter(None, [", ".join(t["name"] for t in st["tools"][:4]),
+                                       st.get("model")]))
+    elif st.get("last_active"):
+        sub = f"last coding {_when(st['last_active'])}"
+    else:
+        sub = "Agent Presence"
+    if live:
+        if st.get("headline"):
+            rows.append(("big", st["headline"]))
+        for a in [a for a in st["agents"] if a["status"] == "busy"][:3]:
+            where = " · ".join(filter(None, [a.get("project"), a.get("machine")]))
+            rows.append(("row", f"{a['action']}" + (f" · {where}" if where else "")))
+        for p in st["projects"][:3]:
+            bits = [f"📁 {p['name']}"]
+            if p.get("branch"):
+                bits.append(f"🌿 {p['branch']}")
+            if p.get("added") or p.get("removed"):
+                bits.append(f"+{p['added']} −{p['removed']}")
+            rows.append(("row", " · ".join(bits)))
+        if len(st["machines"]) > 1:
+            rows.append(("row", " · ".join(
+                f"{m['icon']} {m['label']}" + (f" ({m['agents']})" if m["agents"] else "")
+                + ("" if m["in_use"] or m["agents"] else " 💤") for m in st["machines"])))
+        elif st["machines"]:
+            m = st["machines"][0]
+            rows.append(("row", f"{m['icon']} {m['label']} · {m['os']}"))
+    t = st.get("today") or {}
+    bits = []
+    if t.get("agent_seconds", 0) >= 60:
+        bits.append(f"⏱ {human_duration(t['agent_seconds'])} of agents")
+    if t.get("tokens"):
+        bits.append(f"💸 {human_tokens(t['tokens'])} tokens")
+    if t.get("commits"):
+        bits.append(f"📦 {plural(t['commits'], 'commit')}")
+    if st.get("streak", 0) >= 2:
+        bits.append(f"🔥 {st['streak']} days")
+    if bits:
+        rows.append(("dim", "today " + " · ".join(bits)))
+    H = pad + 50 + len(rows) * lh + 34
+    dot = {"vibe-coding": "#23a55a", "coding": "#23a55a", "idle": "#f0b232", "offline": "#80848e"}[st["state"]]
+    out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" '
+           f'role="img" aria-label="{_x(head)}">',
+           '<style>text{font-family:"Segoe UI",Ubuntu,"Helvetica Neue",Arial,sans-serif;fill:#dbdee1}'
+           '.h{font-size:17px;font-weight:700;fill:#f2f3f5}.s{font-size:12.5px;fill:#949ba4}'
+           '.big{font-size:14px;font-weight:600;fill:#f2f3f5}.row{font-size:13.5px}.dim{font-size:12.5px;fill:#949ba4}'
+           '.f{font-size:11px;fill:#6d6f78}@keyframes p{50%{opacity:.35}}.live{animation:p 2s ease-in-out infinite}</style>',
+           f'<rect x=".5" y=".5" width="{W - 1}" height="{H - 1}" rx="12" fill="#111214" stroke="#2b2d31"/>',
+           f'<rect x="1" y="1" width="{W - 2}" height="4" rx="2" fill="url(#g)"/>',
+           '<defs><linearGradient id="g" x1="0" x2="1"><stop offset="0" stop-color="#f97316"/>'
+           '<stop offset=".5" stop-color="#db2777"/><stop offset="1" stop-color="#14b8a6"/></linearGradient></defs>',
+           f'<circle cx="{pad + 6}" cy="{pad + 12}" r="6" fill="{dot}"' + (' class="live"' if live else "") + "/>",
+           f'<text class="h" x="{pad + 20}" y="{pad + 18}">{_x(head)}</text>',
+           f'<text class="s" x="{pad + 20}" y="{pad + 38}">{_x(sub[:70])}</text>']
+    y = pad + 50
+    for kind, text in rows:
+        y += lh
+        out.append(f'<text class="{kind}" x="{pad}" y="{y}">{_x(clip(text, 62))}</text>')
+    out.append(f'<text class="f" x="{pad}" y="{H - 14}">updated {_x(_when(st["updated"]))}</text>')
+    out.append(f'<text class="f" x="{W - pad}" y="{H - 14}" text-anchor="end">🤖 agent-presence</text>')
+    out.append("</svg>")
+    return "\n".join(out)
+
+
+def _web_signature(st):
+    """What counts as a change worth publishing early (not the clock or counters)."""
+    return json.dumps([st["state"], st.get("headline"), [(a["action"], a.get("project")) for a in st["agents"]],
+                       [p["name"] for p in st["projects"]],
+                       [(m["label"], m["in_use"], m["agents"]) for m in st["machines"]]])
+
+
+class WebPublisher:
+    """Publishes web_status() when it changes (at most every 30 s) and as a
+    heartbeat every `every_seconds`, in the background so the card never waits."""
+
+    def __init__(self, cfg):
+        import threading
+        self.cfg, self.w = cfg, web_cfg(cfg)
+        self.repo, self.branch = self.w["repo"], self.w["branch"] or WEB_BRANCH
+        self.last_sig, self.last_at, self.busy = None, 0, threading.Lock()
+        self.thread_cls = threading.Thread
+
+    def publish(self, st):
+        token = github_token(self.cfg)
+        if not token or not self.repo:
+            log("web: no GitHub token or repo; run `agent-presence web setup`")
+            return False
+        try:
+            publish_files(token, self.repo, self.branch,
+                          {"status.json": json.dumps(st, ensure_ascii=False, indent=1) + "\n",
+                           "status.svg": render_svg(st) + "\n"})
+            if st.get("last_active"):
+                WEB_STATE.write_text(json.dumps({"last_active": st["last_active"]}))
+            return True
+        except Exception as e:
+            log("web: publish failed:", repr(e))
+            return False
+
+    def update(self, st):
+        now, sig = time.time(), _web_signature(st)
+        due = now - self.last_at >= max(60, self.w["every_seconds"])
+        changed = sig != self.last_sig and now - self.last_at >= 30
+        if not (due or changed) or not self.busy.acquire(blocking=False):
+            return
+
+        def go():
+            try:
+                if self.publish(st):
+                    self.last_sig, self.last_at = sig, time.time()
+                else:
+                    self.last_at = time.time()  # back off a full interval after a failure
+            finally:
+                self.busy.release()
+        self.thread_cls(target=go, daemon=True).start()
+
+
+def web_snippets(repo, branch=WEB_BRANCH, landing=LANDING_URL):
+    svg = WEB_RAW.format(repo=repo, branch=branch, file="status.svg")
+    md = (f"<!-- agent-presence:start -->\n<a href=\"{landing}\"><img src=\"{svg}\" "
+          f"alt=\"What I'm coding right now\" width=\"480\"></a>\n<!-- agent-presence:end -->")
+    html = (f'<div data-agent-presence="{repo}"></div>\n'
+            f'<script src="{landing}embed.js" async></script>')
+    return md, html
+
+
 # ------------------------------------------------------- Discord IPC ----
 
 class _SocketConn:
@@ -2037,6 +2327,25 @@ def main():
             log(f"linked: sharing with your other computers on UDP {LINK_PORT}")
         except OSError as e:
             log("link: can't open the network port, running on this computer only:", e)
+    web = WebPublisher(cfg) if web_cfg(cfg)["enabled"] else None
+    if web:
+        log(f"web: publishing to {web.repo} ({web.branch} branch)")
+        import signal
+
+        def stop(*_):
+            raise SystemExit(0)
+        signal.signal(signal.SIGTERM, stop)
+    try:
+        _loop(cfg, conns, link, web)
+    finally:
+        if web and leader_is_me.get("v", True):  # logging out / shutting down
+            web.publish(web_status(cfg, {}, state="offline"))
+
+
+leader_is_me = {}
+
+
+def _loop(cfg, conns, link, web):
     leader, switched_at, switched_from = None, 0, None
     while True:
         tick = int(time.time() // cfg["rotate_seconds"])
@@ -2054,6 +2363,7 @@ def main():
                 log("card is on", "this computer" if new_leader == me["id"] else
                     next((p.get("name") or p["model"] for p in peers if p["id"] == new_leader), "?"))
                 leader = new_leader
+            leader_is_me["v"] = leader == me["id"]
             if leader != me["id"]:
                 acts, cards = {}, {}  # another computer shows the card
             else:
@@ -2063,6 +2373,11 @@ def main():
                 live = merge_peers(live, peers)
                 acts, cards = activities(cfg, tick, live, set(conns) - {"combined"},
                                          machines, switched)
+                if web:
+                    roots = {r for st in live.values() for p, r in st["roots"].items()
+                             if p not in cfg["hide_projects"]}
+                    web.update(web_status(cfg, live, machines, update_streak(bool(live), roots)
+                                          if cfg["show_streak"] else 0))
         except Exception as e:  # never let a parsing hiccup kill the cards
             log("snapshot failed:", repr(e))
             time.sleep(cfg["poll_seconds"])
@@ -2351,6 +2666,108 @@ def cmd_machines(listen=8):
                                   next(p.get("name") or p["model"] for p in peers if p["id"] == lead)))
 
 
+def cmd_web(action, repo=None, name=None, token=None, readme=False, yes=False):
+    cfg = load_config()
+    w = web_cfg(cfg)
+    if action == "off":
+        cfg["web"] = {**w, "enabled": False}
+        CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+        print("Stopped publishing. Restart to apply:  agent-presence setup\n"
+              f"(The last status stays on the {w['branch']} branch until you delete it.)")
+        return
+    if action == "preview":
+        live = snapshot(cfg)
+        st = web_status(cfg, live, machines_summary(machine_status(cfg, live), [], cfg))
+        Path("status.json").write_text(json.dumps(st, ensure_ascii=False, indent=1) + "\n")
+        Path("status.svg").write_text(render_svg(st) + "\n")
+        print("Wrote status.json and status.svg here. Open status.svg in a browser to see the card.")
+        return
+    if action == "status":
+        print(f"publishing: {'on' if w['enabled'] else 'off'}" + (f" → {w['repo']} ({w['branch']})" if w["repo"] else ""))
+        if w["repo"]:
+            md, html = web_snippets(w["repo"], w["branch"])
+            print(f"\nREADME:\n{md}\n\nWebsite:\n{html}")
+        return
+
+    # setup
+    if token:
+        cfg["web"] = {**w, "token": token}
+    tok = github_token(cfg)
+    if not tok:
+        sys.exit("No GitHub login found. Either install the GitHub CLI and run `gh auth login`,\n"
+                 "or make a fine-grained token (github.com/settings/personal-access-tokens) with\n"
+                 "Contents: Read and write on your profile repo, then run:\n"
+                 "    agent-presence web setup --token <token>")
+    try:
+        login = github_call(tok, "GET", "/user")["login"]
+    except Exception as e:
+        sys.exit(f"GitHub didn't accept the token: {e}")
+    repo = repo or w["repo"] or f"{login}/{login}"
+    try:
+        github_call(tok, "GET", f"/repos/{repo}")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            sys.exit(f"Can't find {repo}. Create your profile repo (a public repo named {login})\n"
+                     f"at https://github.com/new, or pick another: agent-presence web setup --repo owner/name")
+        raise
+    cfg["web"] = {**cfg["web"], "enabled": True, "repo": repo, "name": name or w["name"] or login}
+    live = snapshot(cfg)
+    st = web_status(cfg, live, machines_summary(machine_status(cfg, live), [], cfg))
+    if not WebPublisher(cfg).publish(st):
+        sys.exit("Couldn't publish. The token needs permission to write to " + repo + ".")
+    CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+    branch = cfg["web"]["branch"]
+    md, html = web_snippets(repo, branch)
+    print(f"Publishing to {repo} on the {branch} branch (one commit, replaced on each update;\n"
+          "it doesn't count toward your contribution graph).\n")
+    print(f"README card:\n\n{md}\n\nAny website:\n\n{html}\n\n"
+          f"Raw data: {WEB_RAW.format(repo=repo, branch=branch, file='status.json')}\n")
+    if readme:
+        add_to_readme(tok, f"{login}/{login}" if not repo else repo, md, yes)
+    else:
+        print(f"Add the card to your GitHub profile automatically:  agent-presence web setup --readme")
+    print("Restart to start publishing:  agent-presence setup")
+
+
+def add_to_readme(token, repo, snippet, yes=False):
+    """Put the card into repo's README, between agent-presence markers (one commit)."""
+    import base64
+    try:
+        cur = github_call(token, "GET", f"/repos/{repo}/contents/README.md")
+        text = base64.b64decode(cur["content"]).decode("utf-8")
+        sha = cur["sha"]
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise
+        text, sha = "", None
+    new = insert_snippet(text, snippet)
+    if new == text:
+        print(f"{repo} README already has the card.")
+        return
+    if not yes:
+        ans = input(f"Add the card to the README of {repo}? This makes one commit. [y/N] ")
+        if ans.strip().lower() not in ("y", "yes"):
+            print("Skipped. Paste the snippet above wherever you like.")
+            return
+    body = {"message": "Add live coding status card (agent-presence)",
+            "content": base64.b64encode(new.encode("utf-8")).decode()}
+    if sha:
+        body["sha"] = sha
+    github_call(token, "PUT", f"/repos/{repo}/contents/README.md", body)
+    print(f"Added to https://github.com/{repo}")
+
+
+def insert_snippet(text, snippet):
+    """Replace an existing agent-presence block, or add one under the first heading."""
+    block = re.compile(r"<!-- agent-presence:start -->.*?<!-- agent-presence:end -->", re.S)
+    if block.search(text):
+        return block.sub(lambda _: snippet, text, count=1)
+    lines = text.splitlines(keepends=True)
+    at = next((i + 1 for i, ln in enumerate(lines) if ln.lstrip().startswith(("# ", "<h1"))), 0)
+    lines[at:at] = ["\n" if at else "", snippet + "\n", "\n" if not at else ""]
+    return "".join(lines)
+
+
 def cmd_uninstall():
     if IS_LINUX:
         subprocess.run(["systemctl", "--user", "disable", "--now", SERVICE])
@@ -2381,11 +2798,20 @@ def cli():
     lp.add_argument("key", nargs="?", help="the key from your first computer")
     lp.add_argument("--off", action="store_true", help="stop sharing")
     sub.add_parser("machines", help="show this computer and your linked ones")
+    wp = sub.add_parser("web", help="show your activity on your GitHub README and website")
+    wp.add_argument("action", nargs="?", default="setup", choices=["setup", "status", "preview", "off"])
+    wp.add_argument("--repo", help="owner/name to publish to (default: your profile repo)")
+    wp.add_argument("--name", help="name on the card (default: your GitHub login)")
+    wp.add_argument("--token", help="a GitHub token, if you don't use the GitHub CLI")
+    wp.add_argument("--readme", action="store_true", help="also add the card to your profile README")
+    wp.add_argument("-y", "--yes", action="store_true", help="don't ask before editing the README")
     args, _ = ap.parse_known_args(["detect" if a == "--detect" else a for a in sys.argv[1:]])
     if args.cmd == "setup":
         return cmd_setup(args.dry_run, args.quiet)
     if args.cmd == "link":
         return cmd_link(args.key, args.off)
+    if args.cmd == "web":
+        return cmd_web(args.action, args.repo, args.name, args.token, args.readme, args.yes)
     {"detect": cmd_detect, "uninstall": cmd_uninstall, "machines": cmd_machines,
      "doctor": cmd_doctor}.get(args.cmd, main)()
 

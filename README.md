@@ -74,6 +74,7 @@ git clone https://github.com/abelxmendoza/discord-agent-presence && ./discord-ag
 | `agent-presence setup` / `uninstall` | Adds / removes the login service (`setup --dry-run` to preview) |
 | `agent-presence run` | Runs in the foreground |
 | `agent-presence link` / `link <key>` / `link --off` | Shares one card across your computers |
+| `agent-presence web setup [--readme]` / `web preview` / `web off` | Publishes your status for a README card and website widget |
 | `agent-presence machines` | Shows this computer, your linked ones, and which one has the card |
 
 | | Linux | macOS | Windows |
@@ -164,6 +165,47 @@ computer showing the card. Linux reads keyboard/mouse idle time with
 `xprintidle` if installed (`sudo apt install xprintidle`); without it the card
 falls back to whichever Linux machine has the busiest agents.
 
+### On your GitHub README and website
+
+Discord only has room for a couple of lines. The same status can go on your
+GitHub profile as an image card, and on your own site as a full panel with
+every agent and what it's doing, your projects with branch, diff and CI, which
+computers you're on, and today's agent time, tokens, commits and streak.
+
+```bash
+agent-presence web setup --readme   # then: agent-presence setup  (to restart)
+```
+
+It uses your GitHub CLI login (`gh auth login`), or `--token` with a
+fine-grained token that has *Contents: Read and write* on the repo. It
+publishes `status.json` and `status.svg` to an `agent-presence-status` branch of
+your profile repo (`you/you`, or `--repo owner/name`), as one commit that's
+replaced on every update: no history piles up, and commits off the default
+branch don't count toward your contribution graph. Updates go out when
+something changes (at most every 30 s) and every 2 minutes otherwise, and the
+card says *offline* when you log off. `--readme` asks, then adds the card to
+your profile README between `agent-presence` markers.
+
+README card (GitHub refreshes it every few minutes):
+
+```html
+<a href="https://abelxmendoza.github.io/discord-agent-presence/"><img src="https://raw.githubusercontent.com/YOU/YOU/agent-presence-status/status.svg" alt="What I'm coding right now" width="480"></a>
+```
+
+Any website (a live panel; restyle it with `--ap-*` CSS variables):
+
+```html
+<div data-agent-presence="YOU/YOU"></div>
+<script src="https://abelxmendoza.github.io/discord-agent-presence/embed.js" async></script>
+```
+
+The [website](https://abelxmendoza.github.io/discord-agent-presence/#everywhere)
+writes these for you. `web preview` saves the card and data locally without
+publishing. File names stay off the web unless you set `web.show_files`; hidden
+projects stay hidden; set `web.show_tokens` to `false` to leave token counts
+out. When several computers are linked, only the one showing the Discord card
+publishes.
+
 ### Images that change
 
 Each card has two image slots:
@@ -197,6 +239,7 @@ Presence apps* on.
 | `hide_projects` | `[]` | Shown as "private project", with no git, CI or button |
 | `show_machine` | `true` | The computer / OS line, and which linked machines are in use |
 | `machine_name` | `""` | What to call this computer; blank = its model |
+| `web` | off | `enabled`, `repo`, `branch`, `name`, `show_tokens`, `show_files`, `every_seconds` for the README card and website widget |
 | `link_key` | `""` | Same key on each computer = one shared card (`agent-presence link`) |
 | `show_project`, `show_files`, `show_git`, `show_stats`, `show_streak`, `show_model`, `show_ci`, `show_milestones` | `true` | Turn each line on or off |
 | `github_button`, `promo_button`, `mood_verbs` | `true` | |

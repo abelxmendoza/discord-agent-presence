@@ -296,6 +296,64 @@ class Machines(unittest.TestCase):
         self.assertEqual(ap.machine_lines({**ap.DEFAULT_CONFIG, "show_machine": False}, machines), [])
 
 
+class Web(unittest.TestCase):
+    def live(self):
+        return {"claude": {"running_since": time.time() - 600, "focused": False, "projects": ["px4 <x>"],
+                           "roots": {}, "agents": [{"tool": "claude", "status": "busy",
+                                                    "action": "✍ editing nav.cpp", "project": "px4 <x>",
+                                                    "model": "claude-opus-5-5", "mtime": time.time(),
+                                                    "outcome": None, "cwd": None}]}}
+
+    def test_status_hides_files_and_hidden_projects(self):
+        cfg = {**ap.DEFAULT_CONFIG, "hide_projects": ["secret"]}
+        live = self.live()
+        live["claude"]["agents"].append({**live["claude"]["agents"][0], "project": "secret"})
+        st = ap.web_status(cfg, live)
+        self.assertEqual(st["state"], "vibe-coding")
+        self.assertEqual(st["agents"][0]["action"], "✍ editing")
+        self.assertIsNone(st["agents"][1]["project"])
+        self.assertEqual(ap.web_status(cfg, {})["state"], "idle")
+        self.assertEqual(ap.web_status(cfg, live, state="offline")["state"], "offline")
+
+    def test_svg_is_valid_and_escaped(self):
+        import xml.etree.ElementTree as ET
+        st = ap.web_status({**ap.DEFAULT_CONFIG, "web": {**ap.DEFAULT_CONFIG["web"], "name": "A&B"}},
+                           self.live())
+        svg = ap.render_svg(st)
+        ET.fromstring(svg)  # well-formed despite "<x>" and "&" in names
+        self.assertIn("A&amp;B is vibe coding", svg)
+        self.assertIn("px4 &lt;x&gt;", svg)
+        ET.fromstring(ap.render_svg(ap.web_status(ap.DEFAULT_CONFIG, {}, state="offline")))
+
+    def test_readme_snippet_insert_and_replace(self):
+        md, _ = ap.web_snippets("me/me")
+        text = "# Hi there\nI build robots.\n"
+        once = ap.insert_snippet(text, md)
+        self.assertTrue(once.startswith("# Hi there\n\n<!-- agent-presence:start -->"))
+        self.assertIn("I build robots.", once)
+        self.assertEqual(ap.insert_snippet(once, md), once)
+        newer = md.replace("width=\"480\"", "width=\"400\"")
+        self.assertEqual(ap.insert_snippet(once, newer).count("agent-presence:start"), 1)
+        self.assertTrue(ap.insert_snippet("", md).startswith("<!-- agent-presence:start -->"))
+
+    def test_publish_makes_one_parentless_commit(self):
+        calls = []
+
+        def fake(token, method, path, body=None, timeout=15):
+            calls.append((method, path, body))
+            if path.endswith("/git/refs/heads/agent-presence-status"):
+                raise ap.urllib.error.HTTPError(path, 422, "no ref", {}, None)
+            return {"sha": "abc"}
+        real, ap.github_call = ap.github_call, fake
+        try:
+            ap.publish_files("t", "me/me", "agent-presence-status", {"status.json": "{}"})
+        finally:
+            ap.github_call = real
+        self.assertEqual([c[0] for c in calls], ["POST", "POST", "PATCH", "POST"])
+        self.assertEqual(calls[1][2]["parents"], [])
+        self.assertEqual(calls[3][2]["ref"], "refs/heads/agent-presence-status")
+
+
 class Platform(unittest.TestCase):
     def test_process_table_sees_this_process(self):
         procs, kids = ap.proc_table()
