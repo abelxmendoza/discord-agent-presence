@@ -73,7 +73,8 @@ DEFAULT_CONFIG = {
 # Shared Discord applications, so the cards work with zero setup.
 # Application IDs are public identifiers, not secrets.
 SHARED_CLIENT_IDS = {
-    "claude": "1562634034390114445",
+    # "Coding" while you type, "Vibe Coding" while agents work (name_mode).
+    "claude": ["1562634034390114445", "1562654272749965452"],
     "chatgpt": "",
     "grok": "",
     "gemini": "",
