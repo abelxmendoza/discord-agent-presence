@@ -6,6 +6,7 @@ name: macos-app
 on:
   push:
     paths: ["macos/**", "ai_presence.py", "pyproject.toml", ".github/workflows/macos-app.yml"]
+    tags: ["v*"]
   pull_request:
     paths: ["macos/**", "ai_presence.py", "pyproject.toml", ".github/workflows/macos-app.yml"]
   release:
@@ -57,9 +58,21 @@ jobs:
           name: AgentPresence-macOS
           path: dist/AgentPresence-macOS.dmg
 
-      - name: Attach to release
-        if: github.event_name == 'release' || inputs.tag != ''
+      # Pushing a v* tag publishes the release (notes from
+      # .github/release-notes/<tag>.md) with the .dmg attached.
+      - name: Create release for a pushed tag
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --verify-tag --latest \
+            --title "$(head -1 ".github/release-notes/$TAG.title" 2>/dev/null || echo "$TAG")" \
+            --notes-file ".github/release-notes/$TAG.md"
+
+      - name: Attach to release
+        if: github.event_name == 'release' || inputs.tag != '' || startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
         run: gh release upload "$TAG" dist/AgentPresence-macOS.dmg --clobber
