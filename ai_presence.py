@@ -29,7 +29,9 @@ DEFAULT_CONFIG = {
     # Optional: your own Application ID per app, from
     # discord.com/developers/applications (its name is what shows after
     # "Playing"). Blank = use the shared apps that ship with this tool.
-    # Set an app to "off" to never show its card.
+    # Set an app to "off" to never show its card. A list of IDs gives the
+    # card several names (e.g. ["<Coding id>", "<Vibe Coding id>"]); see
+    # name_mode for how it picks.
     "client_ids": {"claude": "", "chatgpt": "", "grok": "", "gemini": "", "muse": "",
                    "copilot": "", "opencode": "", "aider": "",
                    "cursor": "", "windsurf": "", "kiro": "", "vscode": ""},
@@ -57,6 +59,10 @@ DEFAULT_CONFIG = {
     "success_mood_seconds": 180,
     # This many busy agents on one app switches the big picture to <app>_crew.
     "crew_size": 3,
+    # With several IDs per app: "vibe" = 1st name while you're the one coding,
+    # 2nd while agents do the work; "rotate" = cycle every name_rotate_seconds.
+    "name_mode": "vibe",
+    "name_rotate_seconds": 600,
     # Images: "url" = PNGs at image_base_url (missing ones are skipped),
     # "assets" = same names uploaded to each Discord app's Art Assets,
     # "none" = no images.
@@ -127,14 +133,29 @@ def log(*a):
 
 
 def client_ids(cfg):
-    """App -> Application ID: user's own, else the shared one; "off" disables."""
+    """App -> list of Application IDs: user's own, else the shared ones;
+    "off" disables the card."""
     ids = {}
     for tool in TOOLS:
-        mine = (cfg["client_ids"].get(tool) or "").strip()
-        cid = None if mine.lower() == "off" else (mine or SHARED_CLIENT_IDS.get(tool))
-        if cid:
-            ids[tool] = cid
+        mine = cfg["client_ids"].get(tool) or ""
+        if isinstance(mine, str) and mine.strip().lower() == "off":
+            continue
+        chosen = mine or SHARED_CLIENT_IDS.get(tool) or []
+        chosen = [chosen] if isinstance(chosen, str) else list(chosen)
+        chosen = [c.strip() for c in chosen if c and c.strip()]
+        if chosen:
+            ids[tool] = chosen
     return ids
+
+
+def pick_name(cfg, s, n):
+    """Index of which Discord app (name) should show this card right now."""
+    if n < 2 or not s:
+        return 0
+    if cfg["name_mode"] == "rotate":
+        return int(time.time() // cfg["name_rotate_seconds"]) % n
+    agents_working = any(a["status"] == "busy" for a in s["agents"])
+    return 1 if agents_working else 0
 
 
 def load_config():
@@ -377,7 +398,7 @@ def action_for(tool, args, show_files):
     return "⚡ working"
 
 
-OUTCOME_KINDS = {"🧪": "tests", "🔨": "build"}
+OUTCOME_KINDS = {"🧪": "tests", "🔨": "build", "🚀": "push"}
 
 
 def iso_time(ts):
@@ -897,15 +918,21 @@ def latest_outcome(s):
 
 
 def mood(s, cfg=DEFAULT_CONFIG):
-    """Big-picture mood: failed > success > crew > cooking > waiting > idle."""
+    """Big-picture mood: failed > push > success > sim > crew > cooking > waiting > idle."""
     o, now = latest_outcome(s), time.time()
     if o and not o["ok"] and now - o["t"] < cfg["failed_mood_seconds"]:
         return "failed"
     if s.get("ci_failing"):
         return "failed"
+    busy_actions = [a["action"] for a in s["agents"] if a["status"] == "busy"]
+    if any(x.startswith("🚀") for x in busy_actions) or (
+            o and o["ok"] and o["kind"] == "push" and now - o["t"] < cfg["success_mood_seconds"]):
+        return "push"
     if o and o["ok"] and now - o["t"] < cfg["success_mood_seconds"]:
         return "success"
-    busy = sum(a["status"] == "busy" for a in s["agents"])
+    if any(x.startswith("🛸") for x in busy_actions):
+        return "sim"
+    busy = len(busy_actions)
     if busy >= cfg["crew_size"]:
         return "crew"
     if busy:
@@ -916,11 +943,13 @@ def mood(s, cfg=DEFAULT_CONFIG):
 
 
 MOOD_TEXT = {"failed": "something broke", "success": "it passed!", "crew": "the crew is cooking",
+             "push": "shipped it 🚀", "sim": "flying the sim",
              "cooking": "cooking", "waiting": "waiting for me", "idle": "idle"}
 
 
 # When an app has no art for a mood yet, fall back to the closest one it has.
-MOOD_FALLBACK = {"failed": "waiting", "success": "cooking", "crew": "cooking"}
+MOOD_FALLBACK = {"failed": "waiting", "success": "cooking", "crew": "cooking",
+                 "push": "success", "sim": "cooking"}
 
 
 def card_lines(cfg, tool, s, streak):
@@ -962,7 +991,8 @@ def card_lines(cfg, tool, s, streak):
     o = latest_outcome(s)
     if o and time.time() - o["t"] < 1800:
         label = {("tests", True): "✅ tests passed", ("tests", False): "❌ tests failing",
-                 ("build", True): "✅ build passed", ("build", False): "❌ build failed"}[(o["kind"], o["ok"])]
+                 ("build", True): "✅ build passed", ("build", False): "❌ build failed",
+                 ("push", True): "🚀 pushed", ("push", False): "❌ push rejected"}[(o["kind"], o["ok"])]
         add(label, "ci_green" if o["ok"] else "ci_fail")
 
     # 4. Git for the top project, then streak / commits, then model + CI.
@@ -1142,8 +1172,8 @@ class DiscordIPC:
 
 # --------------------------------------------------------------- main ----
 
-def activities(cfg, tick):
-    live = snapshot(cfg)
+def activities(cfg, tick, live=None):
+    live = snapshot(cfg) if live is None else live
     roots = {r for s in live.values() for p, r in s["roots"].items()
              if p not in cfg["hide_projects"]}
     streak = update_streak(bool(live), roots) if cfg["show_streak"] else 0
@@ -1156,25 +1186,35 @@ def main():
     ids = client_ids(cfg)
     if not ids:
         sys.exit(f"No Discord applications configured; see client_ids in {CONFIG_PATH}.")
-    log("cards enabled for:", ", ".join(TOOL_NAMES[t] for t in ids))
-    conns = {t: DiscordIPC(cid) for t, cid in ids.items()}
+    log("cards enabled for:", ", ".join(
+        TOOL_NAMES[t] + (f" ({len(v)} names)" if len(v) > 1 else "") for t, v in ids.items()))
+    # One connection per Discord app; an app with several names has several.
+    conns = {t: [DiscordIPC(cid) for cid in v] for t, v in ids.items()}
     while True:
         tick = int(time.time() // cfg["rotate_seconds"])
         try:
-            acts = activities(cfg, tick)
+            live = snapshot(cfg)
+            acts = activities(cfg, tick, live)
         except Exception as e:  # never let a parsing hiccup kill the cards
             log("snapshot failed:", repr(e))
             time.sleep(cfg["poll_seconds"])
             continue
-        for tool, ipc in conns.items():
-            try:
-                if ipc.update(acts.get(tool)):
-                    a = acts.get(tool)
-                    log(f"{TOOL_NAMES[tool]}:", f"{a['details']} | {a['state']}" if a else "closed")
-            except (OSError, ConnectionError, json.JSONDecodeError) as e:
-                log(f"{TOOL_NAMES[tool]}: discord connection lost:", e)
-                ipc.close()
-                ipc.shown = None
+        for tool, ipcs in conns.items():
+            act = acts.get(tool)
+            want = pick_name(cfg, live.get(tool), len(ipcs))
+            # Clear the names that shouldn't show before setting the one that should,
+            # so the card never appears twice.
+            order = [i for i in range(len(ipcs)) if i != want] + [want]
+            for i in order:
+                ipc = ipcs[i]
+                try:
+                    if ipc.update(act if i == want else None) and i == want:
+                        log(f"{TOOL_NAMES[tool]}" + (f" [name {i + 1}]" if len(ipcs) > 1 else "") + ":",
+                            f"{act['details']} | {act['state']}" if act else "closed")
+                except (OSError, ConnectionError, json.JSONDecodeError) as e:
+                    log(f"{TOOL_NAMES[tool]}: discord connection lost:", e)
+                    ipc.close()
+                    ipc.shown = None
         time.sleep(cfg["poll_seconds"])
 
 
@@ -1224,7 +1264,8 @@ def cmd_doctor():
     ids = client_ids(cfg)
     for tool in TOOLS:
         found = next((b for b in APP_BINARIES[tool] if shutil.which(b)), None)
-        card = "card on" if tool in ids else "no Application ID (card off)"
+        card = ("card on" + (f", {len(ids[tool])} names" if len(ids[tool]) > 1 else "")
+                if tool in ids else "no Application ID (card off)")
         print(f"{ok(found)} {TOOL_NAMES[tool]:16} {('found ' + found) if found else 'not found':22} {card}")
     print(f"{ok(UNIT_PATH.exists())} service installed: {UNIT_PATH}")
     print(f"  config: {CONFIG_PATH}")

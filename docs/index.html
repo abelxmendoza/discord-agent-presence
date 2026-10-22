@@ -139,7 +139,7 @@
   .app small { color: var(--muted); font-weight: 400; }
   .swatch { width: 10px; height: 10px; border-radius: 50%; }
 
-  .moods { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); row-gap: 28px; gap: 16px; }
+  .moods { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); row-gap: 28px; gap: 16px; }
   .mood { text-align: center; }
   .mood img { width: 100%; max-width: 220px; border-radius: 22px; display: block; margin: 0 auto 12px; }
   .mood b { display: block; }
@@ -174,6 +174,7 @@
     .hero { grid-template-columns: minmax(0,1fr); padding-top: 24px; }
     .profile { margin: 0 auto; }
     .grid { grid-template-columns: repeat(2, minmax(0,1fr)); }
+    .moods { grid-template-columns: repeat(3, minmax(0,1fr)); }
   }
   @media (max-width: 600px) {
     body { font-size: 16px; }
@@ -239,7 +240,7 @@
                 <div class="badge">⚡</div>
               </div>
               <div class="act-text">
-                <div class="act-title">Claude</div>
+                <div class="act-title" data-name>Vibe Coding</div>
                 <div class="act-line">▸ px4-autonomous-mission ✦ Omega-Code</div>
                 <div class="act-line rot">⚡ 2 agents cooking (2 of 3)</div>
                 <div class="act-time"><span data-clock>01:42:10</span> elapsed</div>
@@ -281,7 +282,7 @@
       <div class="card"><div class="ic">✦</div><h3>Every project at once</h3><p>Working on three repos? All three show, ranked by activity, collapsing into "+N more" when it's long.</p><div class="ex">▸ px4 ✦ Omega-Code ✦ +1 more</div></div>
       <div class="card"><div class="ic">🌿</div><h3>Git at a glance</h3><p>Branch, uncommitted lines, and commits today for the project you're focused on.</p><div class="ex">🌿 feat/waypoint-nav · +159 −18</div></div>
       <div class="card"><div class="ic">🔥</div><h3>Streaks, models, CI</h3><p>Your day streak, the model in use (Opus, GPT…) and GitHub CI status for public repos.</p><div class="ex">🔥 12-day streak · 🧠 Opus 5.5 · ✅ CI</div></div>
-      <div class="card"><div class="ic">👀</div><h3>Mood verbs</h3><p>"Watching Claude" while agents cook in the background. "Competing in Claude" once you've got 5+ going.</p><div class="ex">Watching Claude</div></div>
+      <div class="card"><div class="ic">👀</div><h3>A card that renames itself</h3><p>"Playing Coding" while you type. "Watching Vibe Coding" while your agents do the work. "Competing in" once you've got 5+ going.</p><div class="ex">Watching Vibe Coding</div></div>
     </div>
   </div>
 </section>
@@ -291,12 +292,14 @@
     <div class="sec-head">
       <div class="kicker">Images that change</div>
       <h2>The card art follows the mood</h2>
-      <p>The big picture reacts to what's going on. It celebrates when your tests pass, rages when the build breaks, and calls in the crew when three or more agents are working. The small badge matches the line underneath it.</p>
+      <p>The big picture reacts to what's going on. It celebrates when tests pass, launches a rocket when you push, opens the control room when the simulator is running, rages when the build breaks, and calls in the crew when three or more agents are working. The small badge matches the line underneath it.</p>
     </div>
     <div class="moods">
       <div class="mood"><img src="assets/claude_cooking.webp" alt="Robot mascot typing, glowing orange" loading="lazy" width="220" height="220"><b>Cooking</b><span>agents are working</span></div>
       <div class="mood"><img src="assets/claude_crew.webp" alt="Three robot mascots at a command center" loading="lazy" width="220" height="220"><b>The crew</b><span>3+ agents at once</span></div>
       <div class="mood"><img src="assets/claude_success.webp" alt="Robot mascot cheering, tests passed" loading="lazy" width="220" height="220"><b>It passed!</b><span>tests or build just went green</span></div>
+      <div class="mood"><img src="assets/claude_push.webp" alt="Robot mascot cheering as a git push rocket launches" loading="lazy" width="220" height="220"><b>Shipped it</b><span>pushing to GitHub</span></div>
+      <div class="mood"><img src="assets/claude_sim.webp" alt="Robot mascot flying drones in a simulation control room" loading="lazy" width="220" height="220"><b>Flying the sim</b><span>ROS 2 / Gazebo / PX4 running</span></div>
       <div class="mood"><img src="assets/claude_failed.webp" alt="Robot mascot frustrated, build failed" loading="lazy" width="220" height="220"><b>Something broke</b><span>tests failing or CI red</span></div>
       <div class="mood"><img src="assets/claude_waiting.webp" alt="Robot mascot waiting by an hourglass" loading="lazy" width="220" height="220"><b>Waiting</b><span>your turn</span></div>
       <div class="mood"><img src="assets/claude_idle.webp" alt="Robot mascot asleep, greyscale" loading="lazy" width="220" height="220"><b>Idle</b><span>app open in the background</span></div>
@@ -405,15 +408,15 @@
   const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const scripts = {
     claude: [
-      { verb: "Watching", mood: "crew",    badge: "⚡", line: "⚡ 3 agents cooking (3 of 3)" },
-      { verb: "Watching", mood: "crew",    badge: "🧪", line: "🧪 running tests · px4-autonomous-mission" },
-      { verb: "Watching", mood: "failed",  badge: "❌", line: "❌ tests failing" },
-      { verb: "Watching", mood: "cooking", badge: "✍", line: "✍ editing waypoint_nav.py · Omega-Code" },
-      { verb: "Watching", mood: "success", badge: "✅", line: "✅ tests passed" },
-      { verb: "Playing",  mood: "success", badge: "🌿", line: "🌿 feat/sim-asset-pipeline · +159 −18" },
-      { verb: "Playing",  mood: "waiting", badge: "⏳", line: "⏳ 1 agent waiting for me" },
-      { verb: "Playing",  mood: "waiting", badge: "🔥", line: "🔥 12-day streak · 📦 6 commits today" },
-      { verb: "Playing",  mood: "idle",    badge: "🧠", line: "🧠 Opus 5.5 · ✅ CI green" },
+      { verb: "Watching", name: "Vibe Coding", mood: "crew",    badge: "⚡", line: "⚡ 3 agents cooking (3 of 3)" },
+      { verb: "Watching", name: "Vibe Coding", mood: "sim",     badge: "🛸", line: "🛸 running the sim · px4-autonomous-mission" },
+      { verb: "Watching", name: "Vibe Coding", mood: "failed",  badge: "❌", line: "❌ tests failing" },
+      { verb: "Watching", name: "Vibe Coding", mood: "cooking", badge: "✍", line: "✍ editing waypoint_nav.py · Omega-Code" },
+      { verb: "Watching", name: "Vibe Coding", mood: "success", badge: "✅", line: "✅ tests passed" },
+      { verb: "Watching", name: "Vibe Coding", mood: "push",    badge: "🚀", line: "🚀 pushing · px4-autonomous-mission" },
+      { verb: "Playing",  name: "Coding",      mood: "waiting", badge: "⏳", line: "⏳ 1 agent waiting for me" },
+      { verb: "Playing",  name: "Coding",      mood: "cooking", badge: "🔥", line: "🔥 12-day streak · 📦 6 commits today" },
+      { verb: "Playing",  name: "Coding",      mood: "idle",    badge: "🧠", line: "🧠 Opus 5.5 · ✅ CI green" },
     ],
     chatgpt: [
       { verb: "Playing",  mood: "waiting", badge: "⏳", line: "⏳ 1 agent waiting for me" },
@@ -426,7 +429,8 @@
   document.querySelectorAll("[data-card]").forEach((el, n) => {
     const name = el.dataset.card, steps = scripts[name];
     const img = el.querySelector("img.large"), badge = el.querySelector(".badge"),
-          line = el.querySelector(".act-line.rot"), verb = el.querySelector("[data-verb]");
+          line = el.querySelector(".act-line.rot"), verb = el.querySelector("[data-verb]"),
+          title = el.querySelector("[data-name]");
     steps.forEach(s => { new Image().src = `assets/${name}_${s.mood}.webp`; }); // preload
     let i = 0;
     const show = () => {
@@ -434,6 +438,7 @@
       line.classList.add("fade");
       setTimeout(() => {
         line.textContent = s.line; verb.textContent = s.verb;
+        if (title && s.name) title.textContent = s.name;
         badge.textContent = s.badge; badge.classList.add("pop");
         img.src = `assets/${name}_${s.mood}.webp`;
         line.classList.remove("fade");

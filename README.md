@@ -47,6 +47,10 @@ Watching Claude
   read from its command exit codes: ✅ tests passed / ❌ build failed.
 - **Model and CI.** The model in use (Opus 5.5, GPT-…). CI status comes from the
   GitHub check runs, for public repos only.
+- **A card that renames itself.** Give a card two Discord apps, e.g. `Coding`
+  and `Vibe Coding`. It shows "Coding" while you're the one typing and "Vibe
+  Coding" while your agents do the work (or set `"name_mode": "rotate"` to
+  cycle). The timer carries over when it switches.
 - **Mood verb.** **Watching** while agents work and you're in another window,
   **Competing in** at 5+ agents, otherwise **Playing**.
 - **GitHub button** on public repos. Other people can click it; Discord doesn't
@@ -93,6 +97,7 @@ Each card has two image slots, and both change as you work:
 
 - **Big picture:** the app in its current mood. *cooking* while agents
   work, *crew* with 3+ agents, *success* right after tests or a build pass,
+  *push* while pushing or right after, *sim* while ROS 2 / Gazebo / PX4 runs,
   *failed* when they fail or CI is red, *waiting* when agents need you, and
   *idle* when the app is just open.
 - **Small badge:** follows the rotating line. It shows the agent count, the
