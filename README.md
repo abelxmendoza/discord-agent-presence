@@ -73,6 +73,8 @@ git clone https://github.com/abelxmendoza/discord-agent-presence && ./discord-ag
 | `agent-presence detect` | Previews every card, rotating line and image |
 | `agent-presence setup` / `uninstall` | Adds / removes the login service (`setup --dry-run` to preview) |
 | `agent-presence run` | Runs in the foreground |
+| `agent-presence link` / `link <key>` / `link --off` | Shares one card across your computers |
+| `agent-presence machines` | Shows this computer, your linked ones, and which one has the card |
 
 | | Linux | macOS | Windows |
 |---|---|---|---|
@@ -126,6 +128,42 @@ name is what follows "Playing") and put its Application ID under
 `client_ids.cursor` in the config. That tool then gets its own card and leaves
 the combined one.
 
+### Several computers
+
+Each computer shows which machine it is and its OS: `💻 MacBook Pro · macOS 15`
+(Raspberry Pi and Jetson boards are recognized too). Hover the big picture to
+see the full OS version. Hostnames and serial numbers are never shown; set
+`machine_name` to call it something else.
+
+Run the tool on each computer, then link them with one key:
+
+```bash
+agent-presence link            # on the first computer: prints a key
+agent-presence link <key>      # on each of the others
+agent-presence setup           # restart on each to apply
+```
+
+Linked computers on the same network share **one card**. It sits on whichever
+computer you touched last (keyboard or mouse) and moves about 15 seconds after
+you switch, with a short `↪ moved to MacBook Pro` line. Every machine's agents
+count toward the card, so it reads like:
+
+```
+⚡ 5 agents cooking · Claude 3 · Codex 2
+🖥 2 machines: 💻 MacBook Pro (3) · 🖥 Alienware Aurora R16 (2)
+🖥 Alienware Aurora R16: 2 agents cooking while I'm away
+```
+
+A machine without Discord open (a Jetson running agents over SSH, say) still
+adds its agents but never shows the card itself. Machines share a small signed
+packet over UDP port 47777 on your local network; the key stops other people's
+computers from posting to your card. The first time, macOS asks to allow Python
+to find devices on your local network, and Windows asks to allow it through
+the firewall: say yes. Git lines, streaks and today's tokens come from the
+computer showing the card. Linux reads keyboard/mouse idle time with
+`xprintidle` if installed (`sudo apt install xprintidle`); without it the card
+falls back to whichever Linux machine has the busiest agents.
+
 ### Images that change
 
 Each card has two image slots:
@@ -157,6 +195,9 @@ Presence apps* on.
 | Key | Default | |
 |---|---|---|
 | `hide_projects` | `[]` | Shown as "private project", with no git, CI or button |
+| `show_machine` | `true` | The computer / OS line, and which linked machines are in use |
+| `machine_name` | `""` | What to call this computer; blank = its model |
+| `link_key` | `""` | Same key on each computer = one shared card (`agent-presence link`) |
 | `show_project`, `show_files`, `show_git`, `show_stats`, `show_streak`, `show_model`, `show_ci`, `show_milestones` | `true` | Turn each line on or off |
 | `github_button`, `promo_button`, `mood_verbs` | `true` | |
 | `client_ids` | shared apps | Per tool: your own Application ID, a list of IDs for several names, or `"off"`. `combined` is the shared card |
@@ -169,7 +210,9 @@ Presence apps* on.
 
 **Privacy:** everything on the card is visible to anyone who can see your
 profile: project, branch and file names, and commit counts. Commit messages and
-full paths are never shown. No code leaves your machine.
+full paths are never shown, nor are hostnames. No code leaves your machine;
+linked computers share only card-level status with each other on your local
+network.
 
 ## Supported tools
 

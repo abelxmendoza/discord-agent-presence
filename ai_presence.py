@@ -66,6 +66,13 @@ DEFAULT_CONFIG = {
     "show_milestones": True,  # "🎉 PR #42 merged", "🏆 100th commit this month"
     "milestone_seconds": 600, # how long a milestone stays on the card
     "mood_verbs": True,       # Watching / Competing in, instead of always Playing
+    # A line naming this computer and its OS ("💻 MacBook Pro · macOS 15"), and
+    # with several linked computers, which ones are in use.
+    "show_machine": True,
+    "machine_name": "",       # what to call this computer; blank = its model
+    # Same key on each of your computers = they share one card that follows
+    # whichever one you're using. Set with `agent-presence link`.
+    "link_key": "",
     # Big picture switches to <app>_failed / <app>_success after a test or
     # build run, for this long.
     "failed_mood_seconds": 900,
@@ -1300,7 +1307,7 @@ MOOD_FALLBACK = {"failed": "waiting", "success": "cooking", "crew": "cooking",
                  "push": "success", "sim": "cooking"}
 
 
-def card_lines(cfg, tool, s, streak):
+def card_lines(cfg, tool, s, streak, machines=None, switched=None):
     """Every line this card can rotate through, as dicts of
     text / party ("(2 of 3)") / badge (small image) / hover (its tooltip)."""
     hidden = set(cfg["hide_projects"])
@@ -1343,6 +1350,14 @@ def card_lines(cfg, tool, s, streak):
     # 1b. On the combined card: which tools are open right now.
     if len(s.get("tools", [])) > 1:
         add("🧰 " + " · ".join(TOOL_NAMES[t].split(" ·")[0] for t in s["tools"]))
+
+    # 1c. Which computer(s): "💻 MacBook Pro · macOS 15", or with several
+    # linked ones "🖥 2 machines: 💻 MacBook Pro (3) · 🖥 Aurora R16 (2)".
+    for i, (text, hover) in enumerate(machine_lines(cfg, machines or [], switched)):
+        if switched and i == 0:
+            lines.insert(0, {"text": clip(text), "badge": None, "hover": hover, "party": None})
+        else:
+            add(text, None, hover)
 
     # 2. What each busy agent is doing right now (newest first, up to 3).
     for a in sorted(busy, key=lambda a: -a["mtime"])[:3]:
@@ -1412,7 +1427,7 @@ def card_lines(cfg, tool, s, streak):
     return lines, top, slug
 
 
-def build_activity(cfg, tool, s, totals, streak, tick):
+def build_activity(cfg, tool, s, totals, streak, tick, machines=None, switched=None):
     projects = list(dict.fromkeys(
         "private project" if p in cfg["hide_projects"] else p for p in s["projects"]))
     agents = s["agents"]
@@ -1425,7 +1440,7 @@ def build_activity(cfg, tool, s, totals, streak, tick):
     else:
         details = f"Building with {TOOL_NAMES[tool]}"
 
-    lines, top, slug = card_lines(cfg, tool, s, streak)
+    lines, top, slug = card_lines(cfg, tool, s, streak, machines, switched)
     line = lines[tick % len(lines)]
 
     kind = PLAYING
@@ -1459,12 +1474,350 @@ def build_activity(cfg, tool, s, totals, streak, tick):
         across = (f"{plural(totals['agents'], 'agent')} across {plural(totals['tools'], 'app')}"
                   if totals["tools"] > 1 and not s.get("tools")
                   else f"{TOOL_NAMES[tool]} · {MOOD_TEXT[m]}")
+        here = next((x for x in machines or [] if x["me"]), None)
+        if here and cfg["show_machine"]:
+            across += f" · on {here['label']}"
         act["assets"] = {"large_image": large, "large_text": clip(across)}
         small = image(cfg, line["badge"], f"agents_{min(len(agents), 9)}" if agents else None)
         if small:
             act["assets"]["small_image"] = small
             act["assets"]["small_text"] = clip(line["hover"] or "")
     return act
+
+
+# ------------------------------------------------------- machines ----
+# Which computer this is, how long since you touched it, and (with a link
+# key) what your other computers are doing. Linked machines share a small
+# status packet over the local network; the one you used most recently
+# shows the card, with every machine's agents on it.
+
+MAC_OS_NAMES = {26: "Tahoe", 15: "Sequoia", 14: "Sonoma", 13: "Ventura", 12: "Monterey", 11: "Big Sur"}
+JUNK_MODELS = {"", "to be filled by o.e.m.", "system product name", "default string",
+               "not applicable", "none", "o.e.m.", "type1productconfigid"}
+LAPTOP_CHASSIS = {"8", "9", "10", "14", "30", "31", "32"}  # DMI chassis types
+LINK_PORT = 47777
+PEER_TTL = 20            # seconds a peer stays known without a packet
+IN_USE_SECONDS = 120     # touched this recently = "in use"
+SWITCH_MARGIN = 15       # hysteresis before the card moves to another machine
+_machine = {}
+
+
+def _read(path):
+    try:
+        return Path(path).read_text(errors="ignore").replace("\x00", "").strip()
+    except OSError:
+        return ""
+
+
+def _clean_model(s):
+    s = " ".join((s or "").split())
+    return "" if s.lower() in JUNK_MODELS else s
+
+
+def machine_info():
+    """{"id", "model", "chip", "kind" (laptop/desktop/board), "os", "os_full"} for this computer.
+    Computed once: system_profiler / PowerShell are slow."""
+    if _machine:
+        return _machine
+    model, chip, kind, os_short, os_full = "", "", "desktop", "", ""
+    import platform
+    if IS_MAC:
+        try:
+            hw = json.loads(run("system_profiler", "-json", "SPHardwareDataType") or "{}")
+            hw = (hw.get("SPHardwareDataType") or [{}])[0]
+        except ValueError:
+            hw = {}
+        model = hw.get("machine_name") or run("sysctl", "-n", "hw.model")
+        chip = hw.get("chip_type") or hw.get("cpu_type") or ""
+        kind = "laptop" if "macbook" in model.lower() else "desktop"
+        ver = run("sw_vers", "-productVersion") or platform.mac_ver()[0]
+        head = (ver or "").split(".")[0]
+        major = int(head) if head.isdigit() else 0
+        os_short = f"macOS {major}" if major else "macOS"
+        os_full = " ".join(filter(None, ["macOS", MAC_OS_NAMES.get(major), ver]))
+    elif IS_LINUX:
+        board = _read("/proc/device-tree/model")  # Raspberry Pi, Jetson, other SBCs
+        if board:
+            model, kind = re.sub(r"\s+(Rev|Developer Kit).*$", "", board), "board"
+        else:
+            vendor = _clean_model(_read("/sys/class/dmi/id/sys_vendor"))
+            name = _clean_model(_read("/sys/class/dmi/id/product_name"))
+            if vendor.lower().startswith("lenovo"):  # product_name is a part number
+                name = _clean_model(_read("/sys/class/dmi/id/product_version")) or name
+            vendor = re.sub(r"\s*(Inc\.?|Corporation|Co\., Ltd\.?|Technology.*)$", "", vendor)
+            model = name if not vendor or name.lower().startswith(vendor.lower().split()[0]) \
+                else f"{vendor} {name}"
+            if _read("/sys/class/dmi/id/chassis_type") in LAPTOP_CHASSIS:
+                kind = "laptop"
+        rel = {}
+        for line in _read("/etc/os-release").splitlines():
+            k, _, v = line.partition("=")
+            rel[k] = v.strip('"')
+        os_short = " ".join(filter(None, [rel.get("NAME", "Linux").replace(" GNU/Linux", ""),
+                                          rel.get("VERSION_ID")]))
+        os_full = rel.get("PRETTY_NAME") or os_short
+    elif IS_WIN:
+        build = int((platform.version().split(".") + ["0", "0", "0"])[2] or 0)
+        os_short = "Windows 11" if build >= 22000 else f"Windows {platform.release()}"
+        os_full = f"{os_short} (build {build})"
+        out = run("powershell", "-NoProfile", "-Command",
+                  "$c = Get-CimInstance Win32_ComputerSystem; "
+                  "\"$($c.Manufacturer)|$($c.Model)|$($c.PCSystemType)\"")
+        parts = (out or "").split("|")
+        if len(parts) == 3:
+            vendor, name = _clean_model(parts[0]), _clean_model(parts[1])
+            vendor = re.sub(r"\s*(Inc\.?|Corporation)$", "", vendor)
+            model = name if not vendor or name.lower().startswith(vendor.lower().split()[0]) \
+                else f"{vendor} {name}"
+            kind = "laptop" if parts[2].strip() == "2" else "desktop"
+    # Never fall back to the hostname: it often has your real name in it.
+    generic = "Mac" if IS_MAC else "Windows PC" if IS_WIN else "Linux PC"
+    _machine.update(id=machine_id(), model=model or generic,
+                    chip=chip, kind=kind, os=os_short or platform.system(),
+                    os_full=os_full or platform.platform())
+    return _machine
+
+
+def machine_id():
+    """A random ID for this computer, kept across restarts (never the hostname)."""
+    path = STATE_DIR / "machine-id"
+    try:
+        return path.read_text().strip()
+    except OSError:
+        mid = uuid.uuid4().hex[:12]
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        path.write_text(mid)
+        return mid
+
+
+def machine_label(m, cfg=None):
+    """"MacBook Pro" or the machine_name from config."""
+    if cfg and cfg.get("machine_name"):
+        return cfg["machine_name"]
+    return m.get("name") or m["model"]
+
+
+def machine_icon(m):
+    return {"laptop": "💻", "board": "🔌"}.get(m.get("kind"), "🖥")
+
+
+_idle_cache = {}
+
+
+def input_idle():
+    """Seconds since the last keyboard/mouse input on this computer, or None if unknown."""
+    hit = _idle_cache.get("v")
+    if hit and time.time() - hit[0] < 3:
+        return hit[1]
+    secs = None
+    try:
+        if IS_MAC:
+            m = re.search(r'"HIDIdleTime"\s*=\s*(\d+)', run("ioreg", "-c", "IOHIDSystem", "-d", "4") or "")
+            secs = int(m.group(1)) / 1e9 if m else None
+        elif IS_WIN:
+            import ctypes
+
+            class LASTINPUTINFO(ctypes.Structure):
+                _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+            li = LASTINPUTINFO(ctypes.sizeof(LASTINPUTINFO), 0)
+            if ctypes.windll.user32.GetLastInputInfo(ctypes.byref(li)):
+                secs = ((ctypes.windll.kernel32.GetTickCount() - li.dwTime) & 0xFFFFFFFF) / 1000
+        elif os.environ.get("DISPLAY"):
+            out = run("xprintidle")  # optional: sudo apt install xprintidle
+            secs = int(out) / 1000 if out and out.isdigit() else None
+    except Exception:
+        secs = None
+    _idle_cache["v"] = (time.time(), secs)
+    return secs
+
+
+_discord_cache = {}
+
+
+def discord_running():
+    hit = _discord_cache.get("v")
+    if hit and time.time() - hit[0] < 30:
+        return hit[1]
+    found = False
+    for path in ipc_paths():
+        if IS_WIN:
+            try:
+                open(path, "r+b", buffering=0).close()
+                found = True
+                break
+            except OSError:
+                continue
+        elif os.path.exists(path):
+            found = True
+            break
+    _discord_cache["v"] = (time.time(), found)
+    return found
+
+
+def machine_status(cfg, live):
+    """This computer's packet: who it is, how idle, and its agents."""
+    m = machine_info()
+    hidden = set(cfg["hide_projects"])
+    agents = []
+    for tool, s in live.items():
+        for a in s["agents"]:
+            proj = a.get("project")
+            agents.append({"tool": tool, "status": a["status"], "action": a["action"],
+                           "project": None if proj in hidden else proj,
+                           "model": a.get("model"), "mtime": a["mtime"],
+                           "outcome": a.get("outcome")})
+    agents.sort(key=lambda a: -a["mtime"])
+    tools = {t: {"running_since": s["running_since"], "focused": s["focused"],
+                 "projects": [p for p in s["projects"] if p not in hidden][:4]}
+             for t, s in live.items()}
+    idle = input_idle()
+    return {"v": 1, "id": m["id"], "name": cfg.get("machine_name") or "", "model": m["model"],
+            "chip": m["chip"], "kind": m["kind"], "os": m["os"], "os_full": m["os_full"],
+            "idle": None if idle is None else round(idle, 1), "discord": discord_running(),
+            "agents": agents[:12], "tools": tools}
+
+
+class Link:
+    """Shares machine_status() with your other computers over UDP broadcast.
+    Packets are signed with the link key, so only your machines are trusted."""
+
+    def __init__(self, key, port=LINK_PORT, target="<broadcast>"):
+        import hashlib
+        self.key = hashlib.sha256(key.encode()).digest()
+        self.port, self.target = port, target
+        self.peers = {}  # id -> (received_at, packet)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, "SO_REUSEPORT"):
+            try:
+                self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            except OSError:
+                pass
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        self.sock.bind(("", port))
+        self.sock.setblocking(False)
+
+    def seal(self, packet):
+        import hmac
+        body = json.dumps({**packet, "t": round(time.time(), 1)}, separators=(",", ":")).encode()
+        return hmac.new(self.key, body, "sha256").digest()[:16] + body
+
+    def open(self, data):
+        import hmac
+        mac, body = data[:16], data[16:]
+        if not hmac.compare_digest(mac, hmac.new(self.key, body, "sha256").digest()[:16]):
+            return None
+        try:
+            pkt = json.loads(body)
+        except ValueError:
+            return None
+        if not isinstance(pkt, dict) or abs(time.time() - pkt.get("t", 0)) > 60:
+            return None  # stale or replayed (allows a minute of clock drift)
+        return pkt
+
+    def send(self, packet):
+        try:
+            self.sock.sendto(self.seal(packet), (self.target, self.port))
+        except OSError as e:  # no network, or blocked (macOS Local Network permission)
+            log("link: send failed:", e)
+
+    def receive(self, my_id):
+        while True:
+            try:
+                data, _ = self.sock.recvfrom(65535)
+            except (BlockingIOError, OSError):
+                break
+            pkt = self.open(data)
+            if pkt and pkt.get("id") and pkt["id"] != my_id:
+                self.peers[pkt["id"]] = (time.time(), pkt)
+        now = time.time()
+        self.peers = {k: v for k, v in self.peers.items() if now - v[0] < PEER_TTL}
+        return [p for _, p in self.peers.values()]
+
+
+def pick_leader(me, peers, current=None):
+    """ID of the machine that should show the card: the one you touched most
+    recently, among machines with Discord open. Sticks with the current one
+    until another is clearly more recent, so it doesn't flicker."""
+    every = [me] + list(peers)
+    able = [p for p in every if p.get("discord")] or [me]
+
+    def idle(p):
+        return p["idle"] if p.get("idle") is not None else 3600
+
+    def busy(p):
+        return sum(a["status"] == "busy" for a in p.get("agents", []))
+    best = min(able, key=lambda p: (idle(p), -busy(p), p["id"]))
+    cur = next((p for p in able if p["id"] == current), None)
+    if cur and cur is not best and idle(cur) - idle(best) < SWITCH_MARGIN:
+        return cur["id"]
+    return best["id"]
+
+
+def merge_peers(live, peers):
+    """Add other machines' agents and open tools into this machine's snapshot."""
+    for p in peers:
+        label = p.get("name") or p.get("model") or "another computer"
+        for tool, t in p.get("tools", {}).items():
+            if tool not in TOOLS:
+                continue
+            s = live.setdefault(tool, {"running_since": t["running_since"], "agents": [],
+                                       "projects": [], "roots": {}, "focused": False})
+            s["running_since"] = min(s["running_since"], t["running_since"])
+            for proj in t.get("projects", []):
+                if proj not in s["projects"]:
+                    s["projects"].append(proj)
+        for a in p.get("agents", []):
+            if a.get("tool") in TOOLS and a["tool"] in live:
+                live[a["tool"]]["agents"].append({**a, "cwd": None, "branch": None,
+                                                  "machine": label})
+    return live
+
+
+def machines_summary(me, peers, cfg):
+    """[{label, icon, os, agents, busy, in_use, me}] for machines worth showing."""
+    out = []
+    for p in [me] + list(peers):
+        agents = p.get("agents", [])
+        idle = p.get("idle")
+        in_use = idle is not None and idle < IN_USE_SECONDS
+        if not (agents or in_use or p is me):
+            continue
+        out.append({"label": (cfg.get("machine_name") if p is me else p.get("name")) or p["model"],
+                    "icon": machine_icon(p), "os": p.get("os", ""), "os_full": p.get("os_full", ""),
+                    "agents": len(agents), "busy": sum(a["status"] == "busy" for a in agents),
+                    "in_use": in_use, "me": p is me})
+    return out
+
+
+def machine_lines(cfg, machines, switched=None):
+    """Card lines about your computers: [(text, hover)]."""
+    if not cfg.get("show_machine", True) or not machines:
+        return []
+    lines = []
+    if switched:
+        lines.append((f"↪ moved to {switched}", f"switched to {switched}"))
+    if len(machines) == 1:
+        m = machines[0]
+        lines.append((f"{m['icon']} {m['label']} · {m['os']}", f"{m['label']} · {m['os_full']}"))
+        return lines
+    using = sum(m["in_use"] for m in machines)
+    head = f"🖥 {plural(len(machines), 'machine')}" + (" in use" if using == len(machines) else "")
+    parts = []
+    for m in machines:
+        bit = f"{m['icon']} {m['label']}"
+        if m["agents"]:
+            bit += f" ({m['agents']})"
+        elif not m["in_use"]:
+            bit += " 💤"
+        parts.append(bit)
+    lines.append((head + ": " + " · ".join(parts),
+                  " · ".join(f"{m['label']}: {m['os_full']}" for m in machines)))
+    away = [m for m in machines if m["busy"] and not m["in_use"] and not m["me"]]
+    if away:
+        m = max(away, key=lambda m: m["busy"])
+        lines.append((f"{m['icon']} {m['label']}: {plural(m['busy'], 'agent')} cooking while I'm away", None))
+    return lines
 
 
 # ------------------------------------------------------- Discord IPC ----
@@ -1635,7 +1988,7 @@ def plan_cards(cfg, live, own):
     return cards
 
 
-def activities(cfg, tick, live=None, own=None):
+def activities(cfg, tick, live=None, own=None, machines=None, switched=None):
     live = snapshot(cfg) if live is None else live
     own = set(client_ids(cfg)) - {"combined"} if own is None else own
     roots = {r for s in live.values() for p, r in s["roots"].items()
@@ -1643,8 +1996,10 @@ def activities(cfg, tick, live=None, own=None):
     streak = update_streak(bool(live), roots) if cfg["show_streak"] else 0
     totals = {"agents": sum(len(s["agents"]) for s in live.values()), "tools": len(live)}
     cards = plan_cards(cfg, live, own)
-    return ({k: build_activity(cfg, tool, st, totals, streak, tick) for k, (tool, st) in cards.items()},
-            cards)
+    if machines is None:
+        machines = machines_summary(machine_status(cfg, {}), [], cfg)
+    return ({k: build_activity(cfg, tool, st, totals, streak, tick, machines, switched)
+             for k, (tool, st) in cards.items()}, cards)
 
 
 PID_FILE = STATE_DIR / "agent-presence.pid"
@@ -1675,11 +2030,39 @@ def main():
         TOOL_NAMES[t] + (f" ({len(v)} names)" if len(v) > 1 else "") for t, v in ids.items()))
     # One connection per Discord app; an app with several names has several.
     conns = {t: [DiscordIPC(cid) for cid in v] for t, v in ids.items()}
+    link = None
+    if cfg["link_key"]:
+        try:
+            link = Link(cfg["link_key"])
+            log(f"linked: sharing with your other computers on UDP {LINK_PORT}")
+        except OSError as e:
+            log("link: can't open the network port, running on this computer only:", e)
+    leader, switched_at, switched_from = None, 0, None
     while True:
         tick = int(time.time() // cfg["rotate_seconds"])
         try:
             live = snapshot(cfg)
-            acts, cards = activities(cfg, tick, live, set(conns) - {"combined"})
+            me = machine_status(cfg, live)
+            peers = []
+            if link:
+                link.send(me)
+                peers = link.receive(me["id"])
+            new_leader = pick_leader(me, peers, leader)
+            if new_leader != leader:
+                if leader and new_leader == me["id"]:
+                    switched_at, switched_from = time.time(), leader
+                log("card is on", "this computer" if new_leader == me["id"] else
+                    next((p.get("name") or p["model"] for p in peers if p["id"] == new_leader), "?"))
+                leader = new_leader
+            if leader != me["id"]:
+                acts, cards = {}, {}  # another computer shows the card
+            else:
+                machines = machines_summary(me, peers, cfg)
+                here = next(m["label"] for m in machines if m["me"])
+                switched = here if time.time() - switched_at < 120 and switched_from else None
+                live = merge_peers(live, peers)
+                acts, cards = activities(cfg, tick, live, set(conns) - {"combined"},
+                                         machines, switched)
         except Exception as e:  # never let a parsing hiccup kill the cards
             log("snapshot failed:", repr(e))
             time.sleep(cfg["poll_seconds"])
@@ -1760,7 +2143,8 @@ def cmd_detect():
         print("No supported apps open and no agents running right now.")
         return
     ids = client_ids(cfg)
-    acts, cards = activities(cfg, 0, live, set(ids) - {"combined"})
+    machines = machines_summary(machine_status(cfg, live), [], cfg)
+    acts, cards = activities(cfg, 0, live, set(ids) - {"combined"}, machines)
     streak = update_streak(True, {r for st in live.values() for p, r in st["roots"].items()
                                   if p not in cfg["hide_projects"]})
     for key, (tool, s) in cards.items():
@@ -1771,7 +2155,7 @@ def cmd_detect():
         print(f"\n{VERBS[act['type']]} {name}" + ("   (combined card: " + ", ".join(
             TOOL_NAMES[t] for t in s["tools"]) + ")" if key == "combined" else ""))
         print(f"  {act['details']}")
-        lines = card_lines(cfg, tool, s, streak)[0]
+        lines = card_lines(cfg, tool, s, streak, machines)[0]
         print(f"  [big: {tool}_{mood(s, cfg)}]")
         for ln in lines:
             party = ln["party"]
@@ -1907,6 +2291,66 @@ WantedBy=graphical-session.target
           f"\nLive log:            {log_hint()}")
 
 
+def cmd_link(key=None, off=False):
+    import secrets
+    cfg = load_config()
+    if off:
+        cfg["link_key"] = ""
+        print("Unlinked. This computer shows its own card again.")
+    elif key:
+        cfg["link_key"] = key.strip()
+        print("Linked. Your computers with this key now share one card.")
+    elif cfg["link_key"]:
+        print(f"This computer's link key:\n\n    {cfg['link_key']}\n\n"
+              "On your other computers run:  agent-presence link " + cfg["link_key"])
+        return
+    else:
+        cfg["link_key"] = secrets.token_urlsafe(12)
+        print(f"Made a link key for your computers:\n\n    {cfg['link_key']}\n\n"
+              "On each of your other computers (same Wi-Fi or network), run:\n"
+              f"    agent-presence link {cfg['link_key']}\n\n"
+              "Keep it private: anyone on your network with it could post to your card.")
+    CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+    print("\nRestart to apply:  agent-presence setup")
+
+
+def cmd_machines(listen=8):
+    cfg = load_config()
+    me = machine_status(cfg, snapshot(cfg))
+    print(f"This computer: {machine_icon(me)} {me['name'] or me['model']}"
+          + (f" ({me['chip']})" if me["chip"] else "") + f" · {me['os_full']}")
+    idle = me["idle"]
+    print(f"  last input: {'unknown' if idle is None else human_duration(idle) + ' ago' if idle >= 60 else 'just now'}"
+          f" · Discord {'open' if me['discord'] else 'not running'} · {plural(len(me['agents']), 'agent')}")
+    if not cfg["link_key"]:
+        print("\nNot linked. Run `agent-presence link` to share one card across your computers.")
+        return
+    try:
+        link = Link(cfg["link_key"])
+    except OSError as e:
+        print(f"\nCan't open UDP {LINK_PORT}: {e}\n(Is agent-presence already running here? "
+              "It holds the port; this still works if your OS allows port sharing.)")
+        return
+    print(f"\nListening for your other computers for {listen} s…")
+    end = time.time() + listen
+    while time.time() < end:
+        link.send(me)
+        time.sleep(1)
+        link.receive(me["id"])
+    peers = [p for _, p in link.peers.values()]
+    for p in peers:
+        idle = p.get("idle")
+        print(f"  {machine_icon(p)} {p.get('name') or p['model']} · {p.get('os_full', '')} · "
+              f"{'input ' + ('just now' if idle < 60 else human_duration(idle) + ' ago') if idle is not None else 'input unknown'}"
+              f" · Discord {'open' if p.get('discord') else 'closed'} · {plural(len(p.get('agents', [])), 'agent')}")
+    if not peers:
+        print("  none found. Check the other computer is linked with the same key, on the same"
+              " network, and that its firewall allows UDP 47777.")
+    lead = pick_leader(me, peers)
+    print("\nThe card shows on: " + ("this computer" if lead == me["id"] else
+                                  next(p.get("name") or p["model"] for p in peers if p["id"] == lead)))
+
+
 def cmd_uninstall():
     if IS_LINUX:
         subprocess.run(["systemctl", "--user", "disable", "--now", SERVICE])
@@ -1933,10 +2377,16 @@ def cli():
     sp.add_argument("--quiet", action="store_true", help="skip the doctor report afterwards")
     sub.add_parser("uninstall", help="stop and remove the login service")
     sub.add_parser("doctor", help="check Discord, window detection and which apps are found")
+    lp = sub.add_parser("link", help="share one card across your computers")
+    lp.add_argument("key", nargs="?", help="the key from your first computer")
+    lp.add_argument("--off", action="store_true", help="stop sharing")
+    sub.add_parser("machines", help="show this computer and your linked ones")
     args, _ = ap.parse_known_args(["detect" if a == "--detect" else a for a in sys.argv[1:]])
     if args.cmd == "setup":
         return cmd_setup(args.dry_run, args.quiet)
-    {"detect": cmd_detect, "uninstall": cmd_uninstall,
+    if args.cmd == "link":
+        return cmd_link(args.key, args.off)
+    {"detect": cmd_detect, "uninstall": cmd_uninstall, "machines": cmd_machines,
      "doctor": cmd_doctor}.get(args.cmd, main)()
 
 

@@ -417,6 +417,8 @@
       <p>Yes. Create your own application in the Discord Developer Portal and put its ID under <code>client_ids</code>. Point <code>image_base_url</code> at your own art for custom pictures.</p></details>
     <details><summary>Does it work on Mac and Windows?</summary>
       <p>Yes. It runs on Linux (X11), macOS and Windows, and it's tested on all three. On a Mac, download the .dmg and double-click the app; it has a button that walks you through allowing window titles (Accessibility) for editor projects. <code>agent-presence doctor</code> tells you if that's missing. Linux on Wayland can't read window titles yet, but agents and session logs still work.</p></details>
+    <details><summary>I code on more than one computer. What happens?</summary>
+      <p>Install it on each one and link them with <code>agent-presence link</code>. They share one card that follows whichever computer you're using, counts the agents running on all of them, and shows which machines are in use, like <code>🖥 2 machines: 💻 MacBook Pro (3) · 🖥 Aurora R16 (2)</code>. Each card also names the computer and OS. Hostnames are never shown.</p></details>
     <details><summary>Can I add another tool, like Windsurf, Zed or Aider?</summary>
       <p>Yes. Each tool is a few lines saying how to find its process, window and session logs. Open a pull request on GitHub.</p></details>
   </div>

@@ -198,6 +198,104 @@ class Moods(unittest.TestCase):
         self.assertEqual(ap.pick_name(ap.DEFAULT_CONFIG, self.S([], focused=True), 2), 0)
 
 
+class Machines(unittest.TestCase):
+    def peer(self, mid, idle, discord=True, busy=0, waiting=0, model="Alienware Aurora R16",
+             kind="desktop", tool="chatgpt"):
+        ag = [{"tool": tool, "status": "busy", "action": "✍ editing", "project": "omega",
+               "model": None, "mtime": time.time(), "outcome": None}] * busy + \
+             [{"tool": tool, "status": "waiting", "action": "⏳ waiting for me", "project": "omega",
+               "model": None, "mtime": time.time(), "outcome": None}] * waiting
+        tools = {tool: {"running_since": time.time() - 60, "focused": False, "projects": ["omega"]}} \
+            if ag else {}
+        return {"v": 1, "id": mid, "name": "", "model": model, "chip": "", "kind": kind,
+                "os": "Ubuntu 24.04", "os_full": "Ubuntu 24.04.1 LTS", "idle": idle,
+                "discord": discord, "agents": ag, "tools": tools}
+
+    def test_machine_info_never_uses_hostname(self):
+        m = ap.machine_info()
+        for k in ("id", "model", "kind", "os", "os_full"):
+            self.assertTrue(m[k], k)
+        import platform
+        host = platform.node().split(".")[0]
+        if host and host.lower() not in m["model"].lower().split():
+            self.assertNotEqual(m["model"], host)
+
+    def test_link_signs_and_rejects(self):
+        a = ap.Link("secret-key", port=0, target="127.0.0.1")
+        b = ap.Link("other-key", port=0, target="127.0.0.1")
+        sealed = a.seal({"id": "x", "model": "m"})
+        self.assertEqual(a.open(sealed)["model"], "m")
+        self.assertIsNone(b.open(sealed))                       # wrong key
+        self.assertIsNone(a.open(sealed[:-2] + b"}}"))          # tampered
+        old = a.seal({"id": "x"})
+        import hmac
+        body = json.dumps({"id": "x", "t": time.time() - 600}).encode()
+        stale = hmac.new(a.key, body, "sha256").digest()[:16] + body
+        self.assertIsNone(a.open(stale))                        # replayed
+        self.assertIsNotNone(a.open(old))
+        a.sock.close(), b.sock.close()
+
+    def test_link_round_trip(self):
+        recv = ap.Link("k", port=0, target="127.0.0.1")
+        port = recv.sock.getsockname()[1]
+        send = ap.Link("k", port=0, target="127.0.0.1")
+        send.port = port
+        send.send(self.peer("peer1", 3))
+        send.send(self.peer("me", 3))  # our own packets are ignored
+        for _ in range(20):
+            got = recv.receive("me")
+            if got:
+                break
+            time.sleep(0.05)
+        self.assertEqual([p["id"] for p in got], ["peer1"])
+        recv.sock.close(), send.sock.close()
+
+    def test_leader_follows_input_with_hysteresis(self):
+        me, other = self.peer("me", 300), self.peer("other", 2)
+        self.assertEqual(ap.pick_leader(me, [other]), "other")
+        # Current leader keeps the card until the other is clearly more recent.
+        me["idle"], other["idle"] = 10, 20
+        self.assertEqual(ap.pick_leader(me, [other], current="other"), "other")
+        other["idle"] = 40
+        self.assertEqual(ap.pick_leader(me, [other], current="other"), "me")
+
+    def test_machine_without_discord_never_shows_the_card(self):
+        me, jetson = self.peer("me", 900), self.peer("jetson", 0, discord=False, kind="board")
+        self.assertEqual(ap.pick_leader(me, [jetson]), "me")
+        me["discord"] = False  # nobody has Discord: stay put
+        self.assertEqual(ap.pick_leader(me, [jetson]), "me")
+
+    def test_peer_agents_join_the_card(self):
+        me = self.peer("me", 1, model="MacBook Pro", kind="laptop")
+        other = self.peer("other", 900, busy=2)
+        live = {"claude": {"running_since": time.time(), "focused": True, "projects": ["px4"],
+                           "roots": {}, "agents": [{"tool": "claude", "status": "busy",
+                                                    "action": "🧪 running tests", "project": "px4",
+                                                    "model": None, "mtime": time.time(),
+                                                    "outcome": None}]}}
+        live = ap.merge_peers(live, [other])
+        self.assertEqual(len(live["chatgpt"]["agents"]), 2)
+        machines = ap.machines_summary(me, [other], ap.DEFAULT_CONFIG)
+        acts, cards = ap.activities(ap.DEFAULT_CONFIG, 0, live, set(), machines)
+        lines = [ln["text"] for ln in ap.card_lines(ap.DEFAULT_CONFIG, *cards["combined"], 0, machines)[0]]
+        self.assertTrue(any(t.startswith("⚡ 3 agents cooking") for t in lines), lines)
+        self.assertIn("🖥 2 machines: 💻 MacBook Pro · 🖥 Alienware Aurora R16 (2)", lines)
+        self.assertIn("🖥 Alienware Aurora R16: 2 agents cooking while I'm away", lines)
+        self.assertIn("on MacBook Pro", acts["combined"]["assets"]["large_text"])
+
+    def test_single_machine_and_switch_lines(self):
+        me = self.peer("me", 1, model="MacBook Pro", kind="laptop")
+        me["os"], me["os_full"] = "macOS 15", "macOS Sequoia 15.2"
+        machines = ap.machines_summary(me, [], ap.DEFAULT_CONFIG)
+        self.assertEqual(ap.machine_lines(ap.DEFAULT_CONFIG, machines),
+                         [("💻 MacBook Pro · macOS 15", "MacBook Pro · macOS Sequoia 15.2")])
+        lines = ap.card_lines(ap.DEFAULT_CONFIG, "claude",
+                              {"agents": [], "focused": True, "projects": [], "roots": {},
+                               "running_since": time.time()}, 0, machines, "MacBook Pro")[0]
+        self.assertEqual(lines[0]["text"], "↪ moved to MacBook Pro")
+        self.assertEqual(ap.machine_lines({**ap.DEFAULT_CONFIG, "show_machine": False}, machines), [])
+
+
 class Platform(unittest.TestCase):
     def test_process_table_sees_this_process(self):
         procs, kids = ap.proc_table()
