@@ -1,0 +1,13 @@
+[Unit]
+Description=Discord Rich Presence for AI coding tools
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/python3 @REPO@/ai_presence.py
+Restart=always
+RestartSec=20
+Environment=DISPLAY=@DISPLAY@
+
+[Install]
+WantedBy=graphical-session.target
