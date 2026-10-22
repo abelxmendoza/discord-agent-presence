@@ -49,6 +49,12 @@ DEFAULT_CONFIG = {
     "show_ci": True,          # public GitHub repos only
     "github_button": True,    # public GitHub repos only
     "mood_verbs": True,       # Watching / Competing in, instead of always Playing
+    # Big picture switches to <app>_failed / <app>_success after a test or
+    # build run, for this long.
+    "failed_mood_seconds": 900,
+    "success_mood_seconds": 180,
+    # This many busy agents on one app switches the big picture to <app>_crew.
+    "crew_size": 3,
     # Images: "url" = PNGs at image_base_url (missing ones are skipped),
     # "assets" = same names uploaded to each Discord app's Art Assets,
     # "none" = no images.
@@ -335,6 +341,23 @@ def action_for(tool, args, show_files):
     return "⚡ working"
 
 
+OUTCOME_KINDS = {"🧪": "tests", "🔨": "build"}
+
+
+def iso_time(ts):
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def make_outcome(action, ok, when):
+    """Result of the newest test/build run: {"kind", "ok", "t"} or None."""
+    kind = OUTCOME_KINDS.get(action.split()[0])
+    return {"kind": kind, "ok": ok, "t": when} if kind and when else None
+
+
 def claude_agent(f, mtime, cfg):
     recs = tail_records(f)
     info = {"tool": "claude", "mtime": mtime, "model": None, "cwd": None,
@@ -368,6 +391,21 @@ def claude_agent(f, mtime, cfg):
                     info["action"] = action_for(use.get("name", ""), use.get("input"), cfg["show_files"])
             elif msg.get("stop_reason") == "end_turn":
                 info["status"], info["action"] = "waiting", "⏳ waiting for me"
+
+    # Did the newest test/build run pass? Bash results are flagged is_error
+    # on a non-zero exit code.
+    uses, info["outcome"] = {}, None
+    for r in convo:
+        content = (r.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            continue
+        for c in content:
+            if c.get("type") == "tool_use":
+                uses[c.get("id")] = action_for(c.get("name", ""), c.get("input"), False)
+            elif c.get("type") == "tool_result" and c.get("tool_use_id") in uses:
+                o = make_outcome(uses[c["tool_use_id"]], not c.get("is_error"), iso_time(r.get("timestamp")))
+                if o:
+                    info["outcome"] = o
     return info
 
 
@@ -404,6 +442,26 @@ def codex_agent(f, mtime, cfg):
             break
         if kind == "message" and p.get("role") == "user":
             break
+
+    calls, info["outcome"] = {}, None
+    for r in recs:
+        p = r.get("payload") or {}
+        kind = p.get("type")
+        if kind in ("function_call", "custom_tool_call", "local_shell_call"):
+            args = p.get("arguments") or p.get("input") or p.get("action") or {}
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    args = {"command": args}
+            calls[p.get("call_id")] = action_for(p.get("name") or kind, args, False)
+        elif kind in ("function_call_output", "custom_tool_call_output") and p.get("call_id") in calls:
+            m = re.search(r'(?:exit_code\\?"?\s*[:=]|exited with code)\s*(-?\d+)',
+                          json.dumps(p.get("output")), re.I)
+            if m:
+                o = make_outcome(calls[p["call_id"]], m.group(1) == "0", iso_time(r.get("timestamp")))
+                if o:
+                    info["outcome"] = o
     return info
 
 
@@ -565,7 +623,7 @@ def snapshot(cfg):
         if comm == "grok":
             agents.append({"tool": "grok", "mtime": now, "model": None,
                            "cwd": proc_cwd(pid), "branch": None,
-                           "status": "busy", "action": "⚡ working"})
+                           "status": "busy", "action": "⚡ working", "outcome": None})
             rs = state["grok"]["running_since"]
             state["grok"]["running_since"] = min(rs, start) if rs else start
     for a in agents:
@@ -655,12 +713,36 @@ def image(cfg, *keys):
     return None
 
 
-def mood(s):
-    if any(a["status"] == "busy" for a in s["agents"]):
+def latest_outcome(s):
+    outs = [a.get("outcome") for a in s["agents"] if a.get("outcome")]
+    return max(outs, key=lambda o: o["t"]) if outs else None
+
+
+def mood(s, cfg=DEFAULT_CONFIG):
+    """Big-picture mood: failed > success > crew > cooking > waiting > idle."""
+    o, now = latest_outcome(s), time.time()
+    if o and not o["ok"] and now - o["t"] < cfg["failed_mood_seconds"]:
+        return "failed"
+    if s.get("ci_failing"):
+        return "failed"
+    if o and o["ok"] and now - o["t"] < cfg["success_mood_seconds"]:
+        return "success"
+    busy = sum(a["status"] == "busy" for a in s["agents"])
+    if busy >= cfg["crew_size"]:
+        return "crew"
+    if busy:
         return "cooking"
     if s["agents"]:
         return "waiting"
     return "cooking" if s["focused"] else "idle"
+
+
+MOOD_TEXT = {"failed": "something broke", "success": "it passed!", "crew": "the crew is cooking",
+             "cooking": "cooking", "waiting": "waiting for me", "idle": "idle"}
+
+
+# When an app has no art for a mood yet, fall back to the closest one it has.
+MOOD_FALLBACK = {"failed": "waiting", "success": "cooking", "crew": "cooking"}
 
 
 def card_lines(cfg, tool, s, streak):
@@ -698,7 +780,14 @@ def card_lines(cfg, tool, s, streak):
         text = f"{a['action']} · {where}" if where and cfg["show_project"] else a["action"]
         add(text, ACTION_BADGES.get(a["action"].split()[0]), a["action"])
 
-    # 3. Git for the top project, then streak / commits, then model + CI.
+    # 3. Result of the newest test/build run (within the last 30 minutes).
+    o = latest_outcome(s)
+    if o and time.time() - o["t"] < 1800:
+        label = {("tests", True): "✅ tests passed", ("tests", False): "❌ tests failing",
+                 ("build", True): "✅ build passed", ("build", False): "❌ build failed"}[(o["kind"], o["ok"])]
+        add(label, "ci_green" if o["ok"] else "ci_fail")
+
+    # 4. Git for the top project, then streak / commits, then model + CI.
     top = next((p for p in s["projects"] if p not in hidden and s["roots"].get(p)), None)
     root = s["roots"].get(top) if top else None
     git = git_stats(root) if root else None
@@ -727,6 +816,7 @@ def card_lines(cfg, tool, s, streak):
         ci = ci_status(slug, git["branch"])
         if ci:
             bits.append(ci)
+            s["ci_failing"] = ci.startswith("❌")
             badge = CI_BADGES.get(ci.split()[0], badge)
     if bits:
         add(" · ".join(bits), badge)
@@ -771,11 +861,11 @@ def build_activity(cfg, tool, s, totals, streak, tick):
                            "url": f"https://github.com/{slug}"}]
 
     # Big picture: the app in its current mood. Small badge: follows the line.
-    m = mood(s)
-    large = image(cfg, f"{tool}_{m}", tool, "logo")
+    m = mood(s, cfg)
+    large = image(cfg, f"{tool}_{m}", f"{tool}_{MOOD_FALLBACK.get(m, m)}", tool, "logo")
     if large:
         across = (f"{plural(totals['agents'], 'agent')} across {plural(totals['tools'], 'app')}"
-                  if totals["tools"] > 1 else f"{TOOL_NAMES[tool]} · {m}")
+                  if totals["tools"] > 1 else f"{TOOL_NAMES[tool]} · {MOOD_TEXT[m]}")
         act["assets"] = {"large_image": large, "large_text": clip(across)}
         small = image(cfg, line["badge"], f"agents_{min(len(agents), 9)}" if agents else None)
         if small:
@@ -930,8 +1020,9 @@ def cmd_detect():
         act = build_activity(cfg, tool, s, totals, streak, 0)
         print(f"\n{VERBS[act['type']]} {TOOL_NAMES[tool]}")
         print(f"  {act['details']}")
-        print(f"  [big: {tool}_{mood(s)}]")
-        for ln in card_lines(cfg, tool, s, streak)[0]:
+        lines = card_lines(cfg, tool, s, streak)[0]
+        print(f"  [big: {tool}_{mood(s, cfg)}]")
+        for ln in lines:
             party = ln["party"]
             print(f"  ↻ {ln['text']}" + (f"  ({party[0]} of {party[1]})" if party else "")
                   + f"   [badge: {ln['badge']}]")

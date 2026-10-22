@@ -139,7 +139,7 @@
   .app small { color: var(--muted); font-weight: 400; }
   .swatch { width: 10px; height: 10px; border-radius: 50%; }
 
-  .moods { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 16px; }
+  .moods { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); row-gap: 28px; gap: 16px; }
   .mood { text-align: center; }
   .mood img { width: 100%; max-width: 220px; border-radius: 22px; display: block; margin: 0 auto 12px; }
   .mood b { display: block; }
@@ -179,8 +179,9 @@
     body { font-size: 16px; }
     .wrap { padding: 0 16px; }
     .nav-links { display: none; }
-    .grid, .moods { grid-template-columns: minmax(0,1fr); }
-    .mood img { max-width: 180px; }
+    .grid { grid-template-columns: minmax(0,1fr); }
+    .moods { grid-template-columns: repeat(2, minmax(0,1fr)); }
+    .mood img { max-width: 150px; }
     section { padding: 52px 0; }
     .ctas .btn { flex: 1; justify-content: center; }
   }
@@ -290,12 +291,15 @@
     <div class="sec-head">
       <div class="kicker">Images that change</div>
       <h2>The card art follows the mood</h2>
-      <p>The big picture shows the app in its current mood. The small badge matches the line underneath it: the agent count, a test tube while tests run, a flame for your streak, a check for green CI.</p>
+      <p>The big picture reacts to what's going on. It celebrates when your tests pass, rages when the build breaks, and calls in the crew when three or more agents are working. The small badge matches the line underneath it.</p>
     </div>
     <div class="moods">
-      <div class="mood"><img src="assets/claude_cooking.webp" alt="Claude mascot, glowing" loading="lazy" width="220" height="220"><b>Cooking</b><span>agents are working</span></div>
-      <div class="mood"><img src="assets/claude_waiting.webp" alt="Claude mascot, amber" loading="lazy" width="220" height="220"><b>Waiting</b><span>your turn</span></div>
-      <div class="mood"><img src="assets/claude_idle.webp" alt="Claude mascot, grey" loading="lazy" width="220" height="220"><b>Idle</b><span>app open in the background</span></div>
+      <div class="mood"><img src="assets/claude_cooking.webp" alt="Robot mascot typing, glowing orange" loading="lazy" width="220" height="220"><b>Cooking</b><span>agents are working</span></div>
+      <div class="mood"><img src="assets/claude_crew.webp" alt="Three robot mascots at a command center" loading="lazy" width="220" height="220"><b>The crew</b><span>3+ agents at once</span></div>
+      <div class="mood"><img src="assets/claude_success.webp" alt="Robot mascot cheering, tests passed" loading="lazy" width="220" height="220"><b>It passed!</b><span>tests or build just went green</span></div>
+      <div class="mood"><img src="assets/claude_failed.webp" alt="Robot mascot frustrated, build failed" loading="lazy" width="220" height="220"><b>Something broke</b><span>tests failing or CI red</span></div>
+      <div class="mood"><img src="assets/claude_waiting.webp" alt="Robot mascot waiting by an hourglass" loading="lazy" width="220" height="220"><b>Waiting</b><span>your turn</span></div>
+      <div class="mood"><img src="assets/claude_idle.webp" alt="Robot mascot asleep, greyscale" loading="lazy" width="220" height="220"><b>Idle</b><span>app open in the background</span></div>
     </div>
   </div>
 </section>
@@ -394,12 +398,15 @@
   const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const scripts = {
     claude: [
-      { verb: "Watching", mood: "cooking", badge: "⚡", line: "⚡ 2 cooking · ⏳ 1 waiting for me (2 of 3)" },
-      { verb: "Watching", mood: "cooking", badge: "🧪", line: "🧪 running tests · px4-autonomous-mission" },
+      { verb: "Watching", mood: "crew",    badge: "⚡", line: "⚡ 3 agents cooking (3 of 3)" },
+      { verb: "Watching", mood: "crew",    badge: "🧪", line: "🧪 running tests · px4-autonomous-mission" },
+      { verb: "Watching", mood: "failed",  badge: "❌", line: "❌ tests failing" },
       { verb: "Watching", mood: "cooking", badge: "✍", line: "✍ editing waypoint_nav.py · Omega-Code" },
-      { verb: "Playing",  mood: "cooking", badge: "🌿", line: "🌿 feat/sim-asset-pipeline · +159 −18" },
+      { verb: "Watching", mood: "success", badge: "✅", line: "✅ tests passed" },
+      { verb: "Playing",  mood: "success", badge: "🌿", line: "🌿 feat/sim-asset-pipeline · +159 −18" },
+      { verb: "Playing",  mood: "waiting", badge: "⏳", line: "⏳ 1 agent waiting for me" },
       { verb: "Playing",  mood: "waiting", badge: "🔥", line: "🔥 12-day streak · 📦 6 commits today" },
-      { verb: "Playing",  mood: "cooking", badge: "✅", line: "🧠 Opus 5.5 · ✅ CI green" },
+      { verb: "Playing",  mood: "idle",    badge: "🧠", line: "🧠 Opus 5.5 · ✅ CI green" },
     ],
     chatgpt: [
       { verb: "Playing",  mood: "waiting", badge: "⏳", line: "⏳ 1 agent waiting for me" },

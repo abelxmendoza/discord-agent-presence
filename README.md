@@ -41,6 +41,8 @@ Watching Claude
 - **Git.** The branch and uncommitted +/− lines for the top project, plus your
   commits today.
 - **Streak.** Consecutive days with commits or an active card.
+- **Pass / fail.** The result of the newest test or build run each agent did,
+  read from its command exit codes: ✅ tests passed / ❌ build failed.
 - **Model and CI.** The model in use (Opus 5.5, GPT-…). CI status comes from the
   GitHub check runs, for public repos only.
 - **Mood verb.** **Watching** while agents work and you're in another window,
@@ -87,9 +89,10 @@ under `client_ids` in `~/.config/ai-presence/config.json`. Set an app to
 
 Each card has two image slots, and both change as you work:
 
-- **Big picture:** the app in its current mood. `claude_cooking` while agents
-  work, `claude_waiting` when they're waiting on you, `claude_idle` when the
-  app is just open.
+- **Big picture:** the app in its current mood. *cooking* while agents
+  work, *crew* with 3+ agents, *success* right after tests or a build pass,
+  *failed* when they fail or CI is red, *waiting* when agents need you, and
+  *idle* when the app is just open.
 - **Small badge:** follows the rotating line. It shows the agent count, the
   current action (test tube, hammer, pencil, drone…), the git branch, a streak
   flame, the model, or CI status.

@@ -4,10 +4,12 @@ Card art loaded straight from this folder by URL. Any missing file is skipped,
 so it's fine to add these a few at a time. All PNG, 1024×1024.
 See [../IMAGE_PROMPTS.md](../IMAGE_PROMPTS.md) for the generation prompt.
 
-Done so far: `claude` and `chatgpt` (all three moods), `hero`.
+Done so far: `claude` (all six moods), `chatgpt` (cooking / waiting / idle), `hero`.
 
-**Big picture** (app × mood), with `<app>.png` and `logo.png` used as fallbacks:
-`claude_cooking` `claude_waiting` `claude_idle` · `chatgpt_*` · `grok_*` · `cursor_*` · `vscode_*`
+**Big picture** (app × mood): `<app>_cooking`, `_waiting`, `_idle`, plus optional
+`_success` (tests/build just passed), `_failed` (failing tests/build or red CI) and
+`_crew` (3+ busy agents). A missing optional mood falls back to cooking/waiting,
+then `<app>.png`, then `logo.png`. Apps: `claude` `chatgpt` `grok` `cursor` `vscode`.
 
 **Small badge** (follows the rotating line):
 - agent count: `agents_1` … `agents_9` (9 = 9+)
