@@ -177,6 +177,17 @@ computer showing the card. Linux reads keyboard/mouse idle time with
 `xprintidle` if installed (`sudo apt install xprintidle`); without it the card
 falls back to whichever Linux machine has the busiest agents.
 
+**Computers on different networks** (a laptop out and a desktop at home) can
+share the card too: link them with the same key and run `agent-presence web
+setup` with the **same repo** on each (see below). Each computer then also
+keeps its packet on its own `agent-presence-peer-<id>` branch of that repo,
+encrypted and signed with the link key, so the public repo shows nothing
+readable. They pick each other up within about a minute. Only one of them
+publishes the README card at a time, the one you're using, so they never
+overwrite each other, and every computer's agents count on it. Set
+`web.relay: false` to keep a computer on its local network only.
+`agent-presence machines` shows what each computer sees.
+
 ### Your coding habits (private)
 
 While it runs, it keeps a log of your habits on this computer only
@@ -290,7 +301,7 @@ Presence apps* on.
 | `hide_projects` | `[]` | Shown as "private project", with no git, CI or button |
 | `show_machine` | `true` | The computer / OS line, and which linked machines are in use |
 | `machine_name` | `""` | What to call this computer; blank = its model |
-| `web` | off | `enabled`, `repo`, `branch`, `name`, `live`, `share`, `show_tokens`, `show_files`, `show_machines`, `every_seconds` for the README card and website widget |
+| `web` | off | `enabled`, `repo`, `branch`, `name`, `relay`, `live`, `share`, `show_tokens`, `show_files`, `show_machines`, `every_seconds` for the README card and website widget |
 | `link_key` | `""` | Same key on each computer = one shared card (`agent-presence link`) |
 | `show_project`, `show_files`, `show_git`, `show_stats`, `show_streak`, `show_model`, `show_ci`, `show_milestones` | `true` | Turn each line on or off |
 | `github_button`, `promo_button`, `mood_verbs` | `true` | |

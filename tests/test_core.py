@@ -265,6 +265,61 @@ class Machines(unittest.TestCase):
         me["discord"] = False  # nobody has Discord: stay put
         self.assertEqual(ap.pick_leader(me, [jetson]), "me")
 
+    def test_one_computer_publishes_the_web_card(self):
+        me, other = self.peer("me", 300), self.peer("other", 2)
+        me["web"] = True
+        # The other one shows the Discord card but can't publish, so this one does.
+        self.assertEqual(ap.pick_leader(me, [other]), "other")
+        self.assertEqual(ap.pick_leader(me, [other], need="web"), "me")
+        other["web"] = True  # both can: the one in use publishes
+        self.assertEqual(ap.pick_leader(me, [other], need="web"), "other")
+
+    def test_relay_encrypts_and_rejects(self):
+        cfg = {**ap.DEFAULT_CONFIG, "link_key": "secret-key",
+               "web": {**ap.DEFAULT_CONFIG["web"], "enabled": True, "repo": "me/me"}}
+        self.assertTrue(ap.relay_wanted(cfg))
+        self.assertFalse(ap.relay_wanted({**cfg, "link_key": ""}))
+        a = ap.Relay("secret-key", cfg)
+        packet = self.peer("peer1", 3, busy=1)
+        sealed = a.seal(packet)
+        self.assertNotIn("omega", sealed)                       # nothing readable in the repo
+        got = ap.Relay("secret-key", cfg).open(sealed)
+        self.assertEqual((got["id"], got["agents"][0]["project"]), ("peer1", "omega"))
+        self.assertIsNone(ap.Relay("other-key", cfg).open(sealed))  # wrong key
+        import base64
+        raw = bytearray(base64.b64decode(sealed))
+        raw[-1] ^= 1
+        self.assertIsNone(a.open(base64.b64encode(bytes(raw)).decode()))  # tampered
+        self.assertIsNone(a.open("not base64!"))
+
+    def test_relay_sync_reads_other_computers(self):
+        cfg = {**ap.DEFAULT_CONFIG, "link_key": "k",
+               "web": {**ap.DEFAULT_CONFIG["web"], "enabled": True, "repo": "me/me"}}
+        import base64
+        theirs = ap.Relay("k", cfg).seal(self.peer("other", 5, busy=2))
+        written, calls = {}, []
+
+        def call(token, method, path, body=None, timeout=15):
+            calls.append(path)
+            if "matching-refs" in path:
+                return [{"ref": "refs/heads/agent-presence-peer-me", "object": {"sha": "s1"}},
+                        {"ref": "refs/heads/agent-presence-peer-other", "object": {"sha": "s2"}}]
+            return {"content": base64.b64encode(theirs.encode()).decode()}
+        old = ap.github_call, ap.publish_files
+        ap.github_call = call
+        ap.publish_files = lambda token, repo, branch, files: written.update({branch: files})
+        try:
+            relay = ap.Relay("k", cfg)
+            relay.sync(self.peer("me", 1), "tok")
+            relay.sync(self.peer("me", 1), "tok")  # unchanged branch isn't fetched again
+        finally:
+            ap.github_call, ap.publish_files = old
+        self.assertIn("agent-presence-peer-me", written)
+        self.assertEqual([p["id"] for p in relay.receive("me")], ["other"])
+        self.assertEqual(sum("contents" in c for c in calls), 1)
+        relay.peers["other"]["t"] = time.time() - 600
+        self.assertEqual(relay.receive("me"), [])                # stale
+
     def test_peer_agents_join_the_card(self):
         me = self.peer("me", 1, model="MacBook Pro", kind="laptop")
         other = self.peer("other", 900, busy=2)
