@@ -32,12 +32,10 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
-          set -o pipefail
-          bash -x macos/build_app.sh dist 2>&1 | tee build.log
+          bash macos/build_app.sh dist
 
       - name: Smoke test the installer script
         run: |
-          exec > >(tee -a build.log) 2>&1
           set -x
           CORE="dist/Agent Presence.app/Contents/Resources/install_core.sh"
           test "$("$CORE" status)" = "not-installed"
@@ -53,16 +51,6 @@ jobs:
       - name: Install log
         if: always()
         run: cat ~/Library/Logs/agent-presence-install.log || true
-
-      - name: Publish failure log to the ci-debug branch
-        if: failure() && github.event_name == 'push'
-        run: |
-          mkdir -p /tmp/dbg && cd /tmp/dbg
-          cp "$GITHUB_WORKSPACE/build.log" . 2>/dev/null || true
-          cp ~/Library/Logs/agent-presence-install.log . 2>/dev/null || true
-          git init -q && git checkout -q -b ci-debug
-          git add -A && git -c user.name=ci -c user.email=ci@example.com commit -q -m "macos-app failure log $GITHUB_SHA"
-          git push -f "https://x-access-token:${{ github.token }}@github.com/$GITHUB_REPOSITORY" ci-debug
 
       - uses: actions/upload-artifact@v4
         with:
