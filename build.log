@@ -1,0 +1,18 @@
++ set -euo pipefail
++++ dirname macos/build_app.sh
+++ cd macos/..
+++ pwd
++ ROOT=/Users/runner/work/discord-agent-presence/discord-agent-presence
++ OUT=dist
++ NAME='Agent Presence'
++ APP='dist/Agent Presence.app'
++ DMG=dist/AgentPresence-macOS.dmg
+++ sed -n 's/^version = "\(.*\)"/\1/p' /Users/runner/work/discord-agent-presence/discord-agent-presence/pyproject.toml
++ VER=0.8.1
++ '[' -n 0.8.1 ']'
++ rm -rf dist
++ mkdir -p dist
++ echo '==> applet 0.8.1'
+==> applet 0.8.1
++ osacompile -o 'dist/Agent Presence.app' /Users/runner/work/discord-agent-presence/discord-agent-presence/macos/main.applescript
+/Users/runner/work/discord-agent-presence/discord-agent-presence/macos/main.applescript:10: error: Expected expression but found “st”. (-2741)
