@@ -261,6 +261,7 @@ class WindowsIPC(unittest.TestCase):
         finally:
             ap.ipc_paths = orig
         t.join(5)
+        ipc.close()
         self.assertEqual(fake.activities[0]["details"], "▸ test")
 
 

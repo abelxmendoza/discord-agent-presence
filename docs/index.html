@@ -222,7 +222,7 @@
         <code><span class="p">$ </span><span class="cmd">curl -fsSL https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/install.sh | bash</span></code>
         <button class="copy" type="button">Copy</button>
       </div>
-      <p class="small">Linux · X11 · Python 3 · no dependencies · free and open source (MIT)</p>
+      <p class="small">Linux · macOS · Windows · Python 3.9+ · free and open source (MIT) · <a href="#install">Windows install ↓</a></p>
     </div>
 
     <div class="stage" aria-label="Preview of a Discord profile with two Agent Presence cards">
@@ -338,8 +338,11 @@
       <p>No Discord developer setup needed. The cards use shared Discord apps that ship with the tool.</p>
     </div>
     <div class="steps">
-      <div class="step"><div><h3>Run the installer</h3><p>It clones the tool, adds the <code>agent-presence</code> command and starts it on login.</p>
-        <pre>curl -fsSL https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/install.sh | bash</pre></div></div>
+      <div class="step"><div><h3>Run the installer</h3><p>It downloads the tool, adds the <code>agent-presence</code> command and starts it on login.</p>
+        <p style="margin-top:10px"><b>Linux / macOS</b></p>
+        <pre>curl -fsSL https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/install.sh | bash</pre>
+        <p style="margin-top:10px"><b>Windows</b> (PowerShell)</p>
+        <pre>irm https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/install.ps1 | iex</pre></div></div>
       <div class="step"><div><h3>Check everything's found</h3><p>It confirms Discord is running and lists which of your AI apps it detected.</p>
         <pre>agent-presence doctor</pre></div></div>
       <div class="step"><div><h3>Preview your cards</h3><p>It prints exactly what Discord will show, line by line. Then open your profile and look.</p>
@@ -362,8 +365,8 @@
       <p>Turn off Discord's own detection for Visual Studio Code under Settings → Registered Games, and the Agent Presence card, with projects and agents, takes its place.</p></details>
     <details><summary>Can I rename the cards or use my own icons?</summary>
       <p>Yes. Create your own application in the Discord Developer Portal and put its ID under <code>client_ids</code>. Point <code>image_base_url</code> at your own art for custom pictures.</p></details>
-    <details><summary>macOS, Windows, Wayland?</summary>
-      <p>Linux on X11 for now. The Discord side works on every platform; detecting the focused window is the platform-specific part. Contributions are welcome.</p></details>
+    <details><summary>Does it work on Mac and Windows?</summary>
+      <p>Yes. It runs on Linux (X11), macOS and Windows, and it's tested on all three. On a Mac, allow Accessibility for your terminal in System Settings → Privacy &amp; Security so it can read editor window titles. <code>agent-presence doctor</code> tells you if that's missing. Linux on Wayland can't read window titles yet, but agents and session logs still work.</p></details>
     <details><summary>Can I add another tool, like Windsurf, Zed or Aider?</summary>
       <p>Yes. Each tool is a few lines saying how to find its process, window and session logs. Open a pull request on GitHub.</p></details>
   </div>

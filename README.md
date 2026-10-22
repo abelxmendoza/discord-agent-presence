@@ -56,13 +56,33 @@ Watching Claude
 - **GitHub button** on public repos. Other people can click it; Discord doesn't
   show buttons on your own card.
 
-Linux / X11 only. Pure Python 3, no dependencies (uses `xprop`).
+**Linux, macOS and Windows.** Python 3.9+. No dependencies on Linux (it uses
+`/proc` and `xprop`); macOS and Windows use `psutil`, which the installer sets up.
 
 ## Install
+
+**Linux / macOS**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/install.sh | bash
 ```
+
+**Windows** (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/install.ps1 | iex
+```
+
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| Starts at login via | systemd user service | launchd agent | Startup folder |
+| Window detection | `xprop` (X11) | System Events (needs Accessibility*) | Win32 API |
+| Logs | `journalctl --user -u ai-presence -f` | `~/Library/Logs/agent-presence.log` | `~\.local\state\ai-presence\agent-presence.log` |
+
+\* macOS: to read editor window titles, allow Accessibility for your terminal
+or Python under System Settings → Privacy & Security → Accessibility. Without
+it, everything still works except the projects that come only from Cursor or
+VS Code window titles. `agent-presence doctor` tells you if it's missing.
 
 That's it. Cards use shared Discord applications that ship with the tool, so
 there's nothing to set up. The installer clones to
@@ -82,7 +102,7 @@ git clone https://github.com/abelxmendoza/discord-agent-presence && ./discord-ag
 | `agent-presence setup` / `uninstall` | Adds / removes the login service |
 | `agent-presence run` | Runs in the foreground |
 
-Live log: `journalctl --user -u ai-presence -f`
+Live log: see the table above.
 
 ### Use your own Discord applications (optional)
 
@@ -167,9 +187,13 @@ something looks off, please open an issue.
 
 ## How it works
 
-- `/proc` gives app launch times and CLI agents' working directories.
-- `xprop` gives the focused window and editor window titles.
+- `/proc` (Linux) or `psutil` (macOS / Windows) gives app launch times and CLI
+  agents' working directories.
+- `xprop` (Linux), System Events (macOS) or the Win32 API (Windows) gives the
+  focused window and editor window titles.
 - Agent state is read from transcripts: `~/.claude*/projects/*/*.jsonl` and
   `~/.codex/sessions/**/rollout-*.jsonl`.
-- Each app gets its own connection to Discord's local IPC socket, so each one
-  appears as its own card.
+- Each app gets its own connection to Discord's local IPC endpoint (a Unix
+  socket, or a named pipe on Windows), so each one appears as its own card.
+- Tests run on Ubuntu, macOS and Windows in CI, including a fake Discord
+  server over a socket and a named pipe.
