@@ -355,7 +355,7 @@ looks off, please open an issue.
 
 **WSL on Windows:** Claude Code and Codex running inside WSL are found too.
 Their logs are read from each running distro's home folders
-(`\\wsl.localhost\<distro>\home\*`). Process-only tools (Copilot, OpenCode,
+(`\\wsl.localhost\<distro>\home\*`, and `\root`). Process-only tools (Copilot, OpenCode,
 Aider, Muse, Grok) inside WSL aren't visible from Windows.
 
 ## How it works

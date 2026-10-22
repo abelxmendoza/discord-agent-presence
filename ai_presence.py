@@ -926,10 +926,16 @@ def wsl_homes():
         for distro in filter(None, (x.strip().strip("\x00\ufeff") for x in text.splitlines())):
             for root in (rf"\\wsl.localhost\{distro}", rf"\\wsl$\{distro}"):
                 try:
-                    homes += [(root, h) for h in (Path(root) / "home").iterdir() if h.is_dir()]
-                    break
+                    found = [h for h in (Path(root) / "home").iterdir() if h.is_dir()]
                 except OSError:
                     continue
+                try:
+                    if (Path(root) / "root").is_dir():  # agents run as root in minimal distros
+                        found.append(Path(root) / "root")
+                except OSError:
+                    pass
+                homes += [(root, h) for h in found]
+                break
         return homes
     return cached(CACHE, ("wsl",), 60, fetch)
 
