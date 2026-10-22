@@ -8,6 +8,9 @@
  * Reads status.json from the agent-presence-status branch of that repo,
  * which `agent-presence web setup` keeps up to date. Optional attributes:
  *   data-branch="agent-presence-status"   data-compact   data-theme="light"
+ * data-hide="tokens,machines,projects" leaves those parts out on this page.
+ * A parent with data-agent-presence-section is unhidden once data loads, so a
+ * whole page section can stay hidden until there's something to show.
  * Restyle with CSS variables on the element: --ap-bg, --ap-panel, --ap-text,
  * --ap-muted, --ap-line, --ap-accent, --ap-live, --ap-font, --ap-mono, --ap-radius.
  */
@@ -82,7 +85,8 @@
       });
   }
 
-  function render(root, st) {
+  function render(root, st, hide) {
+    hide = hide || {};
     var now = Date.now() / 1000;
     var stale = now - st.updated > STALE;
     var state = stale && st.state !== "offline" ? "offline" : st.state;
@@ -113,7 +117,7 @@
       });
       html += "</ul></div>";
     }
-    if (live && st.projects && st.projects.length) {
+    if (live && st.projects && st.projects.length && !hide.projects) {
       html += "<div class='sec'><div class='lbl'>Projects</div><ul>";
       st.projects.slice(0, 4).forEach(function (p) {
         var name = p.url ? "<a href='" + esc(p.url) + "' target='_blank' rel='noopener'>" + esc(p.name) + "</a>" : esc(p.name);
@@ -126,7 +130,7 @@
       });
       html += "</ul></div>";
     }
-    if (live && st.machines && st.machines.length) {
+    if (live && st.machines && st.machines.length && !hide.machines) {
       html += "<div class='sec'><div class='lbl'>" + (st.machines.length > 1 ? st.machines.length + " machines" : "Machine") + "</div><ul>";
       st.machines.forEach(function (m) {
         var what = m.agents ? m.agents + " agent" + (m.agents > 1 ? "s" : "") + (m.busy ? ", " + m.busy + " working" : "")
@@ -137,7 +141,7 @@
     }
     var t = st.today || {}, stats = [];
     if (t.agent_seconds >= 60) stats.push([dur(t.agent_seconds), "agent time today"]);
-    if (t.tokens) stats.push([tokens(t.tokens), "tokens today"]);
+    if (t.tokens && !hide.tokens) stats.push([tokens(t.tokens), "tokens today"]);
     if (t.commits) stats.push([t.commits, "commits today"]);
     if (st.streak >= 2) stats.push([st.streak + " days", "coding streak"]);
     if (live && stats.length) {
@@ -158,15 +162,20 @@
     var branch = el.getAttribute("data-branch") || "agent-presence-status";
     if (!/^[\w.-]+\/[\w.-]+$/.test(repo || "")) return;
     var root = el.attachShadow ? el.attachShadow({ mode: "open" }) : el;
+    var hide = {};
+    (el.getAttribute("data-hide") || "").split(",").forEach(function (k) { if (k.trim()) hide[k.trim()] = true; });
     var last = null;
     function tick() {
-      load(repo, branch).then(function (st) { last = st; render(root, st); el.hidden = false; })
-        .catch(function () { if (!last) el.hidden = true; });
+      var sec = el.closest && el.closest("[data-agent-presence-section]");
+      load(repo, branch).then(function (st) {
+        last = st; render(root, st, hide); el.hidden = false;
+        if (sec) sec.hidden = false;  // a page section that waits for real data
+      }).catch(function () { if (!last) { el.hidden = true; if (sec) sec.hidden = true; } });
     }
     tick();
     setInterval(function () { if (!document.hidden) tick(); }, POLL);
     setInterval(function () {  // keep the session timer and "updated" text current
-      if (last) render(root, last);
+      if (last) render(root, last, hide);
     }, 30000);
   }
 
