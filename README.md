@@ -10,8 +10,8 @@
   <a href="https://abelxmendoza.github.io/discord-agent-presence/"><img src="https://img.shields.io/badge/Website-live_demo-F97316?style=for-the-badge&logo=githubpages&logoColor=white" alt="Website"></a>
 </p>
 
-Discord Rich Presence for AI coding tools: **Claude Desktop, ChatGPT / Codex,
-Grok Build, Cursor and VS Code**. It shows which projects you're working on, how
+Discord Rich Presence for AI coding tools: **Claude, ChatGPT / Codex, Grok
+Build, Gemini CLI, Muse Code, Cursor and VS Code**. It shows which projects you're working on, how
 many AI agents are running, and what they're doing right now.
 
 It behaves like Discord's built-in app detection (the "Playing Visual Studio
@@ -30,7 +30,8 @@ Watching Claude
 ```
 
 - **Agents.** Each Claude Code session (from the desktop app, the CLI or the VS
-  Code extension) counts, and so does each Codex thread and running `grok` CLI.
+  Code extension) counts, and so does each Codex thread, Gemini CLI session,
+  and running `grok` or `muse` CLI.
   An agent is "cooking" while its transcript is being written, and "waiting for
   me" once it finishes, asks you something, or sits on a permission prompt.
 - **Live actions.** The agent's latest tool call becomes a line like ✍ editing
@@ -137,6 +138,22 @@ spot in the member list.
 **Privacy:** everything on the card is visible to anyone who can see your
 profile. That includes project, branch and file names and commit counts.
 Commit messages and full paths are never shown.
+
+## Supported tools
+
+| Tool | How it's detected | Live actions | Pass / fail |
+|---|---|---|---|
+| Claude (Desktop, Code CLI, VS Code ext.) | session logs in `~/.claude*/projects` | ✓ | ✓ |
+| ChatGPT / Codex (desktop, CLI) | session logs in `~/.codex/sessions` | ✓ | ✓ |
+| Gemini CLI (Google) | session files in `~/.gemini/tmp/*/chats` | ✓ | ✓ |
+| Muse Code (Meta) | `muse` process (busy while using CPU) | — | — |
+| Grok Build (xAI) | `grok` process (busy while using CPU) | — | — |
+| Cursor, VS Code | window titles | — | — |
+
+Muse Code and Grok Build don't document a local session log yet, so they're
+counted by process: "working" while the CLI is using CPU, otherwise "waiting
+for me". Gemini support follows its documented session format. If you use any
+of these and something looks off, please open an issue.
 
 ## How it works
 

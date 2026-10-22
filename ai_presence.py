@@ -30,7 +30,8 @@ DEFAULT_CONFIG = {
     # discord.com/developers/applications (its name is what shows after
     # "Playing"). Blank = use the shared apps that ship with this tool.
     # Set an app to "off" to never show its card.
-    "client_ids": {"claude": "", "chatgpt": "", "grok": "", "cursor": "", "vscode": ""},
+    "client_ids": {"claude": "", "chatgpt": "", "grok": "", "gemini": "", "muse": "",
+                   "cursor": "", "vscode": ""},
     "poll_seconds": 5,
     # How often the second line moves on to the next item.
     "rotate_seconds": 20,
@@ -68,18 +69,27 @@ SHARED_CLIENT_IDS = {
     "claude": "1562634034390114445",
     "chatgpt": "",
     "grok": "",
+    "gemini": "",
+    "muse": "",
     "cursor": "",
     "vscode": "",
 }
 
-TOOLS = ["claude", "chatgpt", "grok", "cursor", "vscode"]
+TOOLS = ["claude", "chatgpt", "grok", "gemini", "muse", "cursor", "vscode"]
 TOOL_NAMES = {"claude": "Claude", "chatgpt": "ChatGPT · Codex", "grok": "Grok Build",
+              "gemini": "Gemini", "muse": "Muse Code",
               "cursor": "Cursor", "vscode": "VS Code"}
 # Main app process names (/proc/<pid>/comm) -> tool
 APP_PROCS = {"claude-desktop": "claude", "ChatGPT": "chatgpt", "grok-bot": "grok",
              "cursor": "cursor", "code": "vscode"}
 # CLI agent process names -> tool
-CLI_AGENTS = {"claude": "claude", "codex": "chatgpt", "grok": "grok"}
+CLI_AGENTS = {"claude": "claude", "codex": "chatgpt", "grok": "grok", "muse": "muse"}
+# CLI agents with no session log we can read: a running process is the agent.
+PROC_AGENTS = {"grok": "grok", "muse": "muse"}
+# Agents that run under a JS runtime, so /proc comm is just "node": match the
+# command line instead.
+CMDLINE_AGENTS = [(re.compile(r"(?:^|/)gemini(?:\.js)?(?:\x00|$)|@google/gemini-cli"), "gemini")]
+JS_RUNTIMES = {"node", "bun", "deno"}
 # WM_CLASS (lowercased, snap suffix stripped) -> tool
 WINDOW_APPS = {"com.anthropic.claude": "claude", "chatgpt": "chatgpt", "grok-bot": "grok",
                "cursor": "cursor", "code": "vscode"}
@@ -314,6 +324,16 @@ def action_for(tool, args, show_files):
     if isinstance(cmd, list):
         cmd = " ".join(map(str, cmd))
     cmd = str(cmd)
+    if t in ("replace", "write_file", "edit_file"):
+        t = "edit"
+    elif t in ("read_file", "read_many_files"):
+        t = "read"
+    elif t in ("glob", "search_file_content", "list_directory", "grep_search"):
+        t = "grep"
+    elif t in ("google_web_search", "web_fetch"):
+        t = "websearch"
+    elif t == "run_shell_command":
+        t = "shell"
     if t in ("edit", "write", "multiedit", "notebookedit", "apply_patch"):
         return f"✍ editing{f or ' files'}"
     if t == "read":
@@ -465,6 +485,88 @@ def codex_agent(f, mtime, cfg):
     return info
 
 
+def proc_cmdline(pid):
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def agent_tool_for(pid, comm):
+    """Which agent CLI a process is, if any (by name, or command line for JS ones)."""
+    if comm in CLI_AGENTS:
+        return CLI_AGENTS[comm]
+    if comm in JS_RUNTIMES:
+        cmd = proc_cmdline(pid)
+        for pattern, tool in CMDLINE_AGENTS:
+            if pattern.search(cmd):
+                return tool
+    return None
+
+
+CPU_SEEN = {}  # pid -> (cpu ticks, wall time) from the previous poll
+
+
+def cpu_busy(pid):
+    """True if the process used a noticeable amount of CPU since the last poll."""
+    try:
+        f = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        ticks = int(f[11]) + int(f[12])
+    except (OSError, ValueError, IndexError):
+        return False
+    now = time.time()
+    prev = CPU_SEEN.get(pid)
+    CPU_SEEN[pid] = (ticks, now)
+    if not prev:
+        return True  # first sighting: give it the benefit of the doubt
+    rate = (ticks - prev[0]) / CLK_TCK / max(now - prev[1], 0.1)
+    return rate > 0.02  # >2% of a core
+
+
+def gemini_agent(f, mtime, cwd_by_hash, cfg):
+    """Gemini CLI session: ~/.gemini/tmp/<sha256(project root)>/chats/*.json."""
+    try:
+        data = json.loads(f.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    msgs = data.get("messages") if isinstance(data, dict) else data
+    if not isinstance(msgs, list):
+        return None
+    info = {"tool": "gemini", "mtime": mtime, "model": None, "branch": None,
+            "cwd": cwd_by_hash.get(f.parent.parent.name), "status": "busy",
+            "action": "💭 thinking", "outcome": None}
+    for m in msgs:
+        if not isinstance(m, dict):
+            continue
+        if m.get("model"):
+            info["model"] = m["model"]
+        for call in m.get("toolCalls") or []:
+            label = action_for(call.get("name", ""), call.get("args"), False)
+            st = str(call.get("status", "")).lower()
+            if st in ("success", "error"):
+                o = make_outcome(label, st == "success",
+                                 iso_time(call.get("timestamp") or m.get("timestamp")))
+                if o:
+                    info["outcome"] = o
+    last = next((m for m in reversed(msgs) if isinstance(m, dict)), None)
+    if last and last.get("type") not in ("user",):
+        calls = last.get("toolCalls") or []
+        pending = [c for c in calls
+                   if str(c.get("status", "")).lower() not in ("success", "error", "cancelled")]
+        if pending:
+            c = pending[-1]
+            if str(c.get("status", "")).lower() in ("awaiting_approval", "validating"):
+                info["status"], info["action"] = "waiting", "⏳ needs my approval"
+            else:
+                info["action"] = action_for(c.get("name", ""), c.get("args"), cfg["show_files"])
+        elif time.time() - mtime > 15:
+            info["status"], info["action"] = "waiting", "⏳ waiting for me"
+        elif calls:
+            info["action"] = action_for(calls[-1].get("name", ""), calls[-1].get("args"),
+                                        cfg["show_files"])
+    return info
+
+
 def gather_agents(cfg):
     now = time.time()
     keep = now - max(cfg["agent_active_seconds"], cfg["agent_waiting_seconds"])
@@ -497,6 +599,32 @@ def gather_agents(cfg):
                     a = codex_agent(f, m, cfg)
                     if wanted(a):
                         agents.append(a)
+
+    # Gemini names project folders by sha256 of the project root; map the
+    # hashes back using the working dirs of running gemini processes.
+    gem = HOME / ".gemini/tmp"
+    if gem.exists():
+        import hashlib
+        cwd_by_hash = {}
+        for d in Path("/proc").iterdir():
+            if d.name.isdigit():
+                try:
+                    comm = (d / "comm").read_text().strip()
+                except OSError:
+                    continue
+                if agent_tool_for(int(d.name), comm) == "gemini":
+                    cwd = proc_cwd(int(d.name))
+                    for c in filter(None, [cwd, resolve_project(cwd)[1]]):
+                        cwd_by_hash[hashlib.sha256(c.encode()).hexdigest()] = c
+        for f in gem.glob("*/chats/*.json"):
+            try:
+                m = f.stat().st_mtime
+            except OSError:
+                continue
+            if m >= keep:
+                a = gemini_agent(f, m, cwd_by_hash, cfg)
+                if a and wanted(a):
+                    agents.append(a)
     return agents
 
 
@@ -618,14 +746,24 @@ def snapshot(cfg):
             state[tool]["running_since"] = min(rs, start) if rs else start
 
     agents = gather_agents(cfg)
-    # Grok Build has no transcript we can read; a running CLI process is an agent.
+    # CLI agents found by process (Grok Build, Muse Code, and Gemini when it
+    # has no session file yet). Busy while it's using CPU, else waiting on you.
+    logged = {(a["tool"], a["cwd"]) for a in agents}
     for pid, (comm, ppid, start) in procs.items():
-        if comm == "grok":
-            agents.append({"tool": "grok", "mtime": now, "model": None,
-                           "cwd": proc_cwd(pid), "branch": None,
-                           "status": "busy", "action": "⚡ working", "outcome": None})
-            rs = state["grok"]["running_since"]
-            state["grok"]["running_since"] = min(rs, start) if rs else start
+        tool = agent_tool_for(pid, comm)
+        if tool not in ("grok", "muse", "gemini"):
+            continue
+        if procs.get(ppid, ("",))[0] == comm:
+            continue  # a worker of an agent we already counted
+        cwd = proc_cwd(pid)
+        rs = state[tool]["running_since"]
+        state[tool]["running_since"] = min(rs, start) if rs else start
+        if (tool, cwd) in logged or (tool == "gemini" and any(a["tool"] == "gemini" for a in agents)):
+            continue
+        busy = cpu_busy(pid)
+        agents.append({"tool": tool, "mtime": now, "model": None, "cwd": cwd, "branch": None,
+                       "status": "busy" if busy else "waiting",
+                       "action": "⚡ working" if busy else "⏳ waiting for me", "outcome": None})
     for a in agents:
         a["project"], root = resolve_project(a["cwd"])
         state[a["tool"]]["agents"].append(a)
@@ -641,10 +779,11 @@ def snapshot(cfg):
     if win:
         tool = window_tool(win)
         if tool is None and set(win["cls"]) & TERMINALS and win["pid"]:
-            hits = [(procs[c][2], c) for c in descendants(kids, win["pid"])
-                    if procs.get(c, ("",))[0] in CLI_AGENTS]
+            hits = [(procs[c][2], agent_tool_for(c, procs[c][0]))
+                    for c in descendants(kids, win["pid"])
+                    if c in procs and agent_tool_for(c, procs[c][0])]
             if hits:
-                tool = CLI_AGENTS[procs[max(hits)[1]][0]]
+                tool = max(hits)[1]
         if tool:
             state[tool]["focused"] = True
             if tool in ("cursor", "vscode"):
@@ -810,7 +949,8 @@ def card_lines(cfg, tool, s, streak):
     if cfg["show_model"] and models:
         top_model = max(set(models), key=models.count)
         bits.append(f"🧠 {pretty_model(top_model)}")
-        badge = "model_claude" if top_model.startswith("claude") else "model_gpt"
+        badge = next((f"model_{k}" for k in ("claude", "gemini", "muse", "grok")
+                      if k in top_model.lower()), "model_gpt")
     slug = github_slug(root) if root else None
     if cfg["show_ci"] and slug and git and git["branch"] and github_public(slug):
         ci = ci_status(slug, git["branch"])
@@ -1005,6 +1145,7 @@ VERBS = {PLAYING: "Playing", WATCHING: "Watching", COMPETING: "Competing in"}
 SERVICE = "ai-presence"
 UNIT_PATH = HOME / f".config/systemd/user/{SERVICE}.service"
 APP_BINARIES = {"claude": ["claude-desktop", "claude"], "chatgpt": ["chatgpt", "codex"],
+                "gemini": ["gemini"], "muse": ["muse"],
                 "grok": ["grok", "grok-bot"], "cursor": ["cursor"], "vscode": ["code"]}
 
 

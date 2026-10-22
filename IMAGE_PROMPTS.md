@@ -42,6 +42,8 @@ Symbols:
 - cursor  : an isometric wireframe arrow pointer, silver with electric-blue
             (#3B82F6) edges
 - vscode  : an abstract folded ribbon forming a "<" chevron, azure (#0EA5E9)
+- gemini  : a four-pointed sparkle star, blue-to-violet gradient (#4285F4 → #A142F4)
+- muse    : an abstract infinity-loop ribbon, Meta blue (#0866FF) with cyan edges
 
 Moods (same symbol, same position, so switching between them looks like an
 animation frame):
@@ -51,10 +53,10 @@ animation frame):
                    ring around it, calm "your turn" feel
 - <name>_idle    : desaturated grey, dim, almost no glow, sleepy
 
-Files: claude_cooking, claude_waiting, claude_idle, chatgpt_cooking,
-chatgpt_waiting, chatgpt_idle, grok_cooking, grok_waiting, grok_idle,
-cursor_cooking, cursor_waiting, cursor_idle, vscode_cooking, vscode_waiting,
-vscode_idle
+Files: <app>_cooking, <app>_waiting, <app>_idle for each app:
+claude, chatgpt, grok, gemini, muse, cursor, vscode.
+Optional extra moods per app: <app>_success (celebrating, green), <app>_failed
+(frustrated, red) and <app>_crew (three mascots at a command center).
 ```
 
 ## Batch 2 — agent-count badges (9)
@@ -108,6 +110,9 @@ Seven circular badges in the same style, inside the central 80% circle.
                  coral
 - model_gpt    : an abstract six-loop knot (like the chatgpt symbol,
                  simplified), mint
+- model_gemini : a four-pointed sparkle, blue-violet
+- model_muse   : an infinity-loop ribbon, Meta blue
+- model_grok   : an event-horizon ring with a diagonal streak, white/violet
 - ci_green     : a bold check mark inside a shield, green
 - ci_fail      : a bold X inside a shield, red
 - ci_running   : a circular spinner arc, yellow

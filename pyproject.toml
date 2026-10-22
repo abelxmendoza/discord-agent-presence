@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "discord-agent-presence"
-version = "0.2.0"
-description = "Discord Rich Presence for AI coding tools: Claude, ChatGPT/Codex, Grok, Cursor and VS Code"
+version = "0.3.0"
+description = "Discord Rich Presence for AI coding tools: Claude, ChatGPT/Codex, Gemini, Grok, Muse, Cursor and VS Code"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Abel Mendoza" }]
