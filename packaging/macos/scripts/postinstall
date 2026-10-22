@@ -1,0 +1,53 @@
+#!/bin/bash
+# Runs as root after Installer.app copies the files. Builds a private Python
+# environment next to the app, adds the agent-presence command, then starts
+# the login service for whoever is logged in at the screen.
+set -u
+APP="/Library/Application Support/Agent Presence"
+LOG=/tmp/agent-presence-install.log
+exec >>"$LOG" 2>&1
+echo "== $(date) postinstall"
+
+# Prefer a Python that won't move under us: python.org, then Apple's
+# Command Line Tools / Xcode, then Homebrew. 3.9+ is required.
+PY=""
+for p in /Library/Frameworks/Python.framework/Versions/Current/bin/python3 \
+         /Library/Developer/CommandLineTools/usr/bin/python3 \
+         /Applications/Xcode.app/Contents/Developer/usr/bin/python3 \
+         /opt/homebrew/bin/python3 /usr/local/bin/python3; do
+  if [ -x "$p" ] && "$p" -c 'import sys; sys.exit(sys.version_info < (3, 9))' 2>/dev/null; then
+    PY="$p"; break
+  fi
+done
+[ -n "$PY" ] || { echo "no Python 3.9+ found"; exit 1; }
+echo "python: $PY"
+
+"$PY" -m venv --clear "$APP/venv" || exit 1
+# psutil wheels ship inside the package, so this works offline.
+"$APP/venv/bin/python" -m pip install -q --no-index --find-links "$APP/wheels" psutil \
+  || "$APP/venv/bin/python" -m pip install -q psutil || exit 1
+
+WRAPPER='#!/bin/sh
+exec "/Library/Application Support/Agent Presence/venv/bin/python" "/Library/Application Support/Agent Presence/ai_presence.py" "$@"'
+mkdir -p /usr/local/bin
+printf '%s\n' "$WRAPPER" > /usr/local/bin/agent-presence
+chmod 755 /usr/local/bin/agent-presence
+
+user="$(/usr/bin/stat -f%Su /dev/console)"
+if [ -z "$user" ] || [ "$user" = root ] || [ "$user" = loginwindow ]; then
+  echo "nobody logged in at the screen; run 'agent-presence setup' after logging in"
+  exit 0
+fi
+uid="$(id -u "$user")"
+home="$(dscl . -read "/Users/$user" NFSHomeDirectory | sed 's/^NFSHomeDirectory: //')"
+as_user() { launchctl asuser "$uid" sudo -u "$user" -H "$@"; }
+
+# An earlier curl install leaves ~/.local/bin/agent-presence ahead of
+# /usr/local/bin on PATH; point it at this install too.
+if [ -f "$home/.local/bin/agent-presence" ]; then
+  as_user /bin/sh -c 'printf "%s\n" "$1" > "$2"' _ "$WRAPPER" "$home/.local/bin/agent-presence"
+fi
+
+as_user "$APP/venv/bin/python" "$APP/ai_presence.py" setup || exit 1
+echo "done"
+exit 0

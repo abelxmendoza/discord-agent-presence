@@ -1,0 +1,84 @@
+name: macos-installer
+
+# Builds the double-click macOS installer (AgentPresence-macOS.pkg), test
+# installs it on a runner, and attaches it to the GitHub release.
+#
+# Signing and notarization are optional. Add these repo secrets to turn them on:
+#   MACOS_INSTALLER_CERT_P12       base64 of a "Developer ID Installer" .p12
+#   MACOS_INSTALLER_CERT_PASSWORD  password for that .p12
+#   MACOS_INSTALLER_IDENTITY       e.g. "Developer ID Installer: Abel Mendoza (TEAMID)"
+#   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD   for notarytool
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and attach the installer to (e.g. v0.8.1)"
+        required: true
+  pull_request:
+    paths: ["packaging/macos/**", ".github/workflows/macos-installer.yml", "ai_presence.py"]
+
+permissions:
+  contents: write
+
+jobs:
+  pkg:
+    runs-on: macos-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      MACOS_INSTALLER_CERT_P12: ${{ secrets.MACOS_INSTALLER_CERT_P12 }}
+      MACOS_INSTALLER_CERT_PASSWORD: ${{ secrets.MACOS_INSTALLER_CERT_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG || github.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Import signing certificate
+        if: env.MACOS_INSTALLER_CERT_P12 != ''
+        run: |
+          KC="$RUNNER_TEMP/signing.keychain-db"
+          echo "$MACOS_INSTALLER_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p ci "$KC"
+          security set-keychain-settings -lut 3600 "$KC"
+          security unlock-keychain -p ci "$KC"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$MACOS_INSTALLER_CERT_PASSWORD" -T /usr/bin/productbuild
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          echo "INSTALLER_IDENTITY=${{ secrets.MACOS_INSTALLER_IDENTITY }}" >> "$GITHUB_ENV"
+
+      - name: Build installer
+        run: packaging/macos/build-pkg.sh
+
+      - name: Notarize
+        if: env.MACOS_INSTALLER_CERT_P12 != '' && env.APPLE_ID != ''
+        run: |
+          xcrun notarytool submit dist/AgentPresence-macOS.pkg --wait \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
+          xcrun stapler staple dist/AgentPresence-macOS.pkg
+
+      - name: Test install
+        run: |
+          sudo installer -pkg dist/AgentPresence-macOS.pkg -target /
+          cat /tmp/agent-presence-install.log
+          /usr/local/bin/agent-presence --help
+          agent-presence doctor
+          sudo "/Library/Application Support/Agent Presence/uninstall.sh"
+          test ! -e /usr/local/bin/agent-presence
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AgentPresence-macOS
+          path: dist/AgentPresence-macOS.pkg
+
+      - name: Attach to release
+        if: env.TAG != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/AgentPresence-macOS.pkg --clobber

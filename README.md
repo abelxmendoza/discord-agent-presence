@@ -33,7 +33,15 @@ Works on **Linux, macOS and Windows** with Python 3.9+. No Discord setup needed.
 
 ## Install
 
-**Linux / macOS**
+**macOS (double-click installer)**
+
+[**⬇ Download AgentPresence-macOS.pkg**](https://github.com/abelxmendoza/discord-agent-presence/releases/latest/download/AgentPresence-macOS.pkg), open it and click through
+the installer. It needs Python 3.9+ (`xcode-select --install` gives you one) and
+tells you if it's missing. Until the package is signed, macOS may say it can't
+check the developer: open System Settings → Privacy & Security and click
+**Open Anyway**. To remove it: `sudo "/Library/Application Support/Agent Presence/uninstall.sh"`.
+
+**Linux / macOS (terminal)**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/install.sh | bash

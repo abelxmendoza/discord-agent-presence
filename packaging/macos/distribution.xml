@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+  <title>Agent Presence</title>
+  <organization>io.github.abelxmendoza</organization>
+  <welcome file="welcome.html" mime-type="text/html"/>
+  <license file="LICENSE.txt"/>
+  <conclusion file="conclusion.html" mime-type="text/html"/>
+  <options customize="never" require-scripts="true" hostArchitectures="arm64,x86_64"/>
+  <domains enable_localSystem="true"/>
+  <volume-check><allowed-os-versions><os-version min="11.0"/></allowed-os-versions></volume-check>
+  <installation-check script="hasPython()"/>
+  <script><![CDATA[
+function hasPython() {
+  var paths = [
+    "/Library/Frameworks/Python.framework/Versions/Current/bin/python3",
+    "/Library/Developer/CommandLineTools/usr/bin/python3",
+    "/Applications/Xcode.app/Contents/Developer/usr/bin/python3",
+    "/opt/homebrew/bin/python3",
+    "/usr/local/bin/python3"
+  ];
+  for (var i = 0; i < paths.length; i++) {
+    if (system.files.fileExistsAtPath(paths[i])) return true;
+  }
+  my.result.type = "Fatal";
+  my.result.title = "Python 3 is needed first";
+  my.result.message = "Agent Presence runs on Python 3.9 or newer. Open Terminal and run  xcode-select --install  (or install Python from python.org), then open this installer again.";
+  return false;
+}
+  ]]></script>
+  <choices-outline><line choice="default"/></choices-outline>
+  <choice id="default" title="Agent Presence">
+    <pkg-ref id="io.github.abelxmendoza.agent-presence"/>
+  </choice>
+  <pkg-ref id="io.github.abelxmendoza.agent-presence" version="__VERSION__" onConclusion="none">AgentPresence-component.pkg</pkg-ref>
+</installer-gui-script>
