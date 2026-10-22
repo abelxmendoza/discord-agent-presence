@@ -63,13 +63,14 @@ DEFAULT_CONFIG = {
     "show_project": True,
     "show_private_projects": False,  # name repos that aren't public on GitHub
     "show_files": False,      # "editing foo.py" vs just "editing"
+    "show_actions": True,     # what agents are doing, and test/build results
     "show_git": True,         # branch and +/- lines (public repos unless show_private_projects)
     "show_streak": True,
     "show_model": True,
     "show_ci": True,          # public GitHub repos only
     "github_button": True,    # public GitHub repos only
     "promo_button": True,     # 2nd button: "Get Agent Presence" -> landing page
-    "show_stats": True,       # "⏱ 3h 40m of agent time today · 💸 1.2M tokens"
+    "show_stats": True,       # "⏱ 3h 40m of agent time today · 💸 1.2M tokens", commits today
     "show_milestones": True,  # "🎉 PR #42 merged", "🏆 100th commit this month"
     "milestone_seconds": 600, # how long a milestone stays on the card
     "mood_verbs": True,       # Watching / Competing in, instead of always Playing
@@ -114,20 +115,23 @@ DEFAULT_CONFIG = {
 # What each privacy preset sets. DEFAULT_CONFIG holds the "balanced" values.
 PRIVACY_PRESETS = {
     "minimal": {"show_project": False, "show_private_projects": False, "show_files": False,
-                "show_git": False, "show_stats": False, "show_milestones": False,
+                "show_actions": False, "show_git": False, "show_stats": False,
+                "show_milestones": False, "show_streak": False, "show_model": False,
                 "show_ci": False, "github_button": False, "show_machine": False},
     "balanced": {"show_project": True, "show_private_projects": False, "show_files": False,
-                 "show_git": True, "show_stats": True, "show_milestones": True,
+                 "show_actions": True, "show_git": True, "show_stats": True,
+                 "show_milestones": True, "show_streak": True, "show_model": True,
                  "show_ci": True, "github_button": True, "show_machine": True},
     "full": {"show_project": True, "show_private_projects": True, "show_files": True,
-             "show_git": True, "show_stats": True, "show_milestones": True,
+             "show_actions": True, "show_git": True, "show_stats": True,
+             "show_milestones": True, "show_streak": True, "show_model": True,
              "show_ci": True, "github_button": True, "show_machine": True},
 }
 # Before presets, every switch was written to config.json at its default, so
 # these values there mean "never chosen" and now follow the preset.
 _OLD_DEFAULTS = {"show_project": True, "show_files": True, "show_git": True, "show_stats": True,
                  "show_milestones": True, "show_ci": True, "github_button": True,
-                 "show_machine": True}
+                 "show_machine": True, "show_streak": True, "show_model": True}
 
 # Shared Discord applications, so the cards work with zero setup.
 # Application IDs are public identifiers, not secrets.
@@ -1392,6 +1396,15 @@ MOOD_FALLBACK = {"failed": "waiting", "success": "cooking", "crew": "cooking",
                  "push": "success", "sim": "cooking"}
 
 
+def shown_action(cfg, action):
+    """An agent's action as this card may show it. Peers' actions arrive
+    already rendered with their own settings, so file names are checked again."""
+    m = re.search(r"\s+(\S*\.[A-Za-z0-9]{1,8})$", action)
+    if m and (not cfg["show_files"] or SENSITIVE_FILE.search(m.group(1))):
+        return strip_file(action)
+    return action
+
+
 def masked_projects(cfg, s):
     """Projects the Discord card calls "private project": the hidden ones,
     and unless show_private_projects, any that aren't public on GitHub."""
@@ -1456,13 +1469,14 @@ def card_lines(cfg, tool, s, streak, machines=None, switched=None):
             add(text, None, hover)
 
     # 2. What each busy agent is doing right now (newest first, up to 3).
-    for a in sorted(busy, key=lambda a: -a["mtime"])[:3]:
+    for a in sorted(busy, key=lambda a: -a["mtime"])[:3] if cfg["show_actions"] else []:
+        action = shown_action(cfg, a["action"])
         where = a["project"] if a["project"] and a["project"] not in masked else None
-        text = f"{a['action']} · {where}" if where and cfg["show_project"] else a["action"]
-        add(text, ACTION_BADGES.get(a["action"].split()[0]), a["action"])
+        text = f"{action} · {where}" if where and cfg["show_project"] else action
+        add(text, ACTION_BADGES.get(action.split()[0]), action)
 
     # 3. Result of the newest test/build run (within the last 30 minutes).
-    o = latest_outcome(s)
+    o = latest_outcome(s) if cfg["show_actions"] else None
     if o and time.time() - o["t"] < 1800:
         label = {("tests", True): "✅ tests passed", ("tests", False): "❌ tests failing",
                  ("build", True): "✅ build passed", ("build", False): "❌ build failed",
@@ -1494,7 +1508,7 @@ def card_lines(cfg, tool, s, streak, machines=None, switched=None):
     if cfg["show_streak"] and streak >= 2:
         bits.append(f"🔥 {streak}-day streak")
     commits = sum(git_stats(r)["commits_today"] for p, r in s["roots"].items() if p not in hidden)
-    if commits:
+    if commits and cfg["show_stats"]:
         bits.append(f"📦 {plural(commits, 'commit')} today")
     if bits:
         badge = ("streak_big" if streak >= 7 else "streak") if streak >= 2 else "act_commit"

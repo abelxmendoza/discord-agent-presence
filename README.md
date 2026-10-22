@@ -308,7 +308,7 @@ Presence apps* on.
 
 | Key | Default | |
 |---|---|---|
-| `privacy` | `"balanced"` | How much the card shares. `"minimal"`: the app and how many agents, nothing about projects. `"balanced"`: only repos that are public on GitHub are named, no file names. `"full"`: everything, private repo names and file names too. It sets the defaults of the `show_*` keys; set one yourself and yours wins |
+| `privacy` | `"balanced"` | How much the card shares. `"minimal"`: the app and how many agents, nothing else. `"balanced"`: only repos that are public on GitHub are named, no file names. `"full"`: everything, private repo names and file names too. It sets the defaults of the `show_*` keys; set one yourself and yours wins |
 | `hide_projects` | `[]` | Shown as "private project", with no git, CI or button |
 | `show_private_projects` | `false` | Name repos that aren't public on GitHub (and show their branch) |
 | `show_machine` | `true` | The computer / OS line, and which linked machines are in use |
@@ -316,6 +316,7 @@ Presence apps* on.
 | `web` | off | `enabled`, `repo`, `branch`, `name`, `relay`, `live`, `share`, `show_tokens`, `show_files`, `show_machines`, `every_seconds` for the README card and website widget |
 | `link_key` | `""` | Same key on each computer = one shared card (`agent-presence link`) |
 | `show_project`, `show_git`, `show_stats`, `show_streak`, `show_model`, `show_ci`, `show_milestones` | `true` | Turn each line on or off |
+| `show_actions` | `true` | What each agent is doing, and test/build results (off in `"minimal"`) |
 | `show_files` | `false` | "editing foo.py" instead of "editing". Names like `.env`, `id_rsa`, `*.pem` or `secrets.yaml` are never shown |
 | `github_button`, `promo_button`, `mood_verbs` | `true` | |
 | `client_ids` | shared apps | Per tool: your own Application ID, a list of IDs for several names, or `"off"`. `combined` is the shared card |

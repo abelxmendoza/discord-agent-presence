@@ -538,6 +538,23 @@ class Privacy(unittest.TestCase):
         full = self.card({**ap.DEFAULT_CONFIG, **ap.PRIVACY_PRESETS["full"]}, *a)
         self.assertIn("employer-api", full["details"])
 
+    def test_peer_actions_follow_this_cards_settings(self):
+        peer = Web.agent(self, "omega-1", public=True, action="✍ editing roadmap.md")
+        act = self.card(ap.DEFAULT_CONFIG, peer)
+        self.assertNotIn("roadmap.md", json.dumps(act, ensure_ascii=False))
+        full = {**ap.DEFAULT_CONFIG, **ap.PRIVACY_PRESETS["full"]}
+        self.assertEqual(ap.shown_action(full, "✍ editing roadmap.md"), "✍ editing roadmap.md")
+        self.assertEqual(ap.shown_action(full, "✍ editing .env.local"), "✍ editing")
+
+    def test_minimal_shows_only_the_app_and_count(self):
+        cfg = {**ap.DEFAULT_CONFIG, **ap.PRIVACY_PRESETS["minimal"]}
+        a = Web.agent(self, "omega-1", public=True)
+        a["outcome"] = {"kind": "tests", "ok": False, "t": time.time()}
+        s = Web.live(self, a)["claude"]
+        s["tools"] = []
+        lines, _, _ = ap.card_lines(cfg, "claude", s, 9)
+        self.assertEqual([l["text"] for l in lines], ["⚡ 1 agent cooking"])
+
     def test_sensitive_file_names_never_show(self):
         for name in (".env", ".env.local", "id_rsa", "server.pem", "secrets.yaml", "api_key.txt",
                      "aws-credentials", "keys.json"):
