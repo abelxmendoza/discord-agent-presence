@@ -1,0 +1,442 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Presence — your AI agents, live on Discord</title>
+<meta name="description" content="Discord Rich Presence for AI coding tools. Show your projects, how many agents are running and what they're doing, for Claude, ChatGPT/Codex, Grok, Cursor and VS Code.">
+<meta name="theme-color" content="#0B0F1A">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Agent Presence — your AI agents, live on Discord">
+<meta property="og:description" content="Claude, Codex, Grok, Cursor & VS Code cards that show your projects, agent count and what they're doing right now. One-line install.">
+<meta property="og:url" content="https://abelxmendoza.github.io/discord-agent-presence/">
+<meta property="og:image" content="https://abelxmendoza.github.io/discord-agent-presence/assets/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="600">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="assets/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #07090f;
+    --bg-2: #0b0f1a;
+    --panel: #111726;
+    --panel-2: #161d2f;
+    --line: #232c44;
+    --text: #e8ecf6;
+    --muted: #9aa4bd;
+    --orange: #fb923c;
+    --orange-2: #f97316;
+    --teal: #2dd4bf;
+    --cyan: #22d3ee;
+    --blurple: #5865f2;
+    --amber: #f59e0b;
+    --radius: 18px;
+    --mono: "JetBrains Mono", ui-monospace, monospace;
+    --sans: "Space Grotesk", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { overflow-x: clip; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 17px/1.6 var(--sans);
+    background-image:
+      radial-gradient(900px 500px at 15% -10%, rgba(249,115,22,.16), transparent 60%),
+      radial-gradient(900px 500px at 90% 0%, rgba(45,212,191,.14), transparent 60%);
+    background-repeat: no-repeat;
+    overflow-x: hidden;
+  }
+  a { color: inherit; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 20px; }
+  code, pre, .mono { font-family: var(--mono); }
+
+  /* nav */
+  nav { display: flex; align-items: center; justify-content: space-between; padding: 20px 0; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; text-decoration: none; letter-spacing: .2px; }
+  .brand img { width: 32px; height: 32px; border-radius: 9px; }
+  .nav-links { display: flex; gap: 22px; font-size: 15px; }
+  .nav-links a { color: var(--muted); text-decoration: none; }
+  .nav-links a:hover { color: var(--text); }
+
+  /* hero */
+  .hero { display: grid; grid-template-columns: minmax(0,1.05fr) minmax(0,.95fr); gap: 48px; align-items: center; padding: 48px 0 72px; }
+  .eyebrow { display: inline-flex; gap: 8px; align-items: center; font: 600 13px var(--mono); color: var(--cyan);
+             border: 1px solid rgba(34,211,238,.35); background: rgba(34,211,238,.07); padding: 6px 12px; border-radius: 999px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #23a55a; box-shadow: 0 0 10px #23a55a; }
+  h1 { font-size: clamp(38px, 5.4vw, 64px); line-height: 1.04; margin: 18px 0 18px; letter-spacing: -1.5px; }
+  .grad { background: linear-gradient(90deg, var(--orange), #f472b6 45%, var(--teal)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .lede { color: var(--muted); font-size: 19px; max-width: 560px; margin: 0 0 28px; }
+  .ctas { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 22px; }
+  .btn { display: inline-flex; align-items: center; gap: 10px; padding: 13px 20px; border-radius: 12px; font-weight: 700;
+         text-decoration: none; border: 1px solid transparent; transition: transform .15s, box-shadow .15s, background .15s; }
+  .btn:hover { transform: translateY(-2px); }
+  .btn-primary { background: var(--blurple); color: #fff; box-shadow: 0 8px 30px rgba(88,101,242,.4); }
+  .btn-primary:hover { box-shadow: 0 10px 40px rgba(88,101,242,.6); }
+  .btn-ghost { border-color: var(--line); background: rgba(255,255,255,.03); }
+  .btn-ghost:hover { border-color: #3a4566; }
+  .btn svg { width: 18px; height: 18px; }
+
+  .install { display: flex; align-items: center; gap: 0; min-width: 0; background: var(--panel); border: 1px solid var(--line);
+             border-radius: 12px; overflow: hidden; max-width: 640px; }
+  .install code { flex: 1; min-width: 0; padding: 13px 16px; font-size: 13.5px; white-space: nowrap; overflow-x: auto; color: #cfe8ff; scrollbar-width: none; }
+  .install code::-webkit-scrollbar { display: none; }
+  .install code .p { color: var(--teal); user-select: none; }
+  .copy { border: 0; border-left: 1px solid var(--line); background: var(--panel-2); color: var(--text); padding: 0 16px;
+          align-self: stretch; cursor: pointer; font: 600 13px var(--sans); min-width: 84px; }
+  .copy:hover { background: #1d2640; }
+  .copy.done { color: #23a55a; }
+  .small { color: var(--muted); font-size: 14px; margin-top: 12px; }
+
+  /* discord card mock */
+  .stage { position: relative; }
+  .stage::before { content: ""; position: absolute; inset: -40px 0; background: radial-gradient(closest-side, rgba(88,101,242,.25), transparent); filter: blur(20px); z-index: 0; }
+  .profile { position: relative; z-index: 1; background: #111214; border-radius: 16px; overflow: hidden; border: 1px solid #1f2125;
+             box-shadow: 0 30px 80px rgba(0,0,0,.6); max-width: 440px; margin-left: auto; }
+  .banner { height: 84px; background: linear-gradient(120deg, #f97316, #db2777 50%, #14b8a6); }
+  .who { display: flex; align-items: flex-end; gap: 12px; padding: 0 16px; margin-top: -36px; }
+  .avatar { width: 76px; height: 76px; border-radius: 50%; border: 6px solid #111214; background: url(assets/claude_cooking.webp) center/cover; position: relative; }
+  .avatar::after { content: ""; position: absolute; right: -2px; bottom: -2px; width: 20px; height: 20px; border-radius: 50%; background: #23a55a; border: 5px solid #111214; }
+  .name { padding: 6px 16px 0; font-weight: 700; font-size: 20px; }
+  .handle { padding: 0 16px 12px; color: #b5bac1; font-size: 14px; }
+  .acts { padding: 0 12px 14px; display: grid; grid-template-columns: minmax(0,1fr); gap: 10px; }
+  .act { min-width: 0; background: #1e1f22; border-radius: 10px; padding: 12px; font-family: "gg sans", "Noto Sans", system-ui, sans-serif; }
+  .act-head { font-size: 12px; font-weight: 700; text-transform: uppercase; color: #dbdee1; letter-spacing: .2px; margin-bottom: 10px; }
+  .act-body { display: flex; gap: 12px; }
+  .art { position: relative; width: 88px; height: 88px; flex: none; }
+  .art img.large { width: 88px; height: 88px; border-radius: 10px; display: block; transition: opacity .4s; }
+  .badge { position: absolute; right: -6px; bottom: -6px; width: 32px; height: 32px; border-radius: 50%; border: 4px solid #1e1f22;
+           display: grid; place-items: center; font-size: 15px; background: #2b2d31; transition: transform .3s; }
+  .badge.pop { transform: scale(1.25); }
+  .act-text { min-width: 0; flex: 1; font-size: 14px; line-height: 1.35; }
+  .act-title { font-weight: 700; color: #f2f3f5; }
+  .act-line { color: #dbdee1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .act-line.rot { transition: opacity .35s; }
+  .act-time { color: #b5bac1; font-size: 13px; margin-top: 2px; }
+  .act-btn { margin-top: 10px; background: #4e5058; color: #fff; border-radius: 6px; text-align: center; font-size: 14px; font-weight: 600; padding: 7px; }
+  .fade { opacity: 0; }
+
+  /* sections */
+  section { padding: 72px 0; }
+  .sec-head { max-width: 680px; margin-bottom: 36px; }
+  .kicker { font: 600 13px var(--mono); color: var(--orange); letter-spacing: .5px; text-transform: uppercase; }
+  h2 { font-size: clamp(28px, 3.6vw, 40px); line-height: 1.12; margin: 8px 0 12px; letter-spacing: -.8px; }
+  .sec-head p { color: var(--muted); margin: 0; }
+
+  .grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 16px; }
+  .card { background: linear-gradient(180deg, var(--panel), var(--bg-2)); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px; }
+  .card .ic { font-size: 26px; }
+  .card h3 { margin: 10px 0 6px; font-size: 19px; }
+  .card p { margin: 0; color: var(--muted); font-size: 15.5px; }
+  .card .ex { margin-top: 12px; font: 13px var(--mono); color: #cfe8ff; background: rgba(255,255,255,.04); border: 1px solid var(--line);
+              border-radius: 8px; padding: 8px 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .apps { display: flex; flex-wrap: wrap; gap: 10px; }
+  .app { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); font-weight: 600; }
+  .app small { color: var(--muted); font-weight: 400; }
+  .swatch { width: 10px; height: 10px; border-radius: 50%; }
+
+  .moods { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 16px; }
+  .mood { text-align: center; }
+  .mood img { width: 100%; max-width: 220px; border-radius: 22px; display: block; margin: 0 auto 12px; }
+  .mood b { display: block; }
+  .mood span { color: var(--muted); font-size: 15px; }
+
+  .steps { counter-reset: s; display: grid; gap: 14px; max-width: 760px; }
+  .step { counter-increment: s; display: grid; grid-template-columns: 44px 1fr; gap: 16px; align-items: start; }
+  .step::before { content: counter(s); width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; font: 700 18px var(--mono);
+                  background: rgba(249,115,22,.12); color: var(--orange); border: 1px solid rgba(249,115,22,.35); }
+  .step h3 { margin: 8px 0 4px; font-size: 18px; }
+  .step p { margin: 0; color: var(--muted); }
+  .step > div { min-width: 0; }
+  pre { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; overflow-x: auto; font-size: 13.5px; color: #cfe8ff; margin: 10px 0 0; }
+
+  details { border: 1px solid var(--line); border-radius: 14px; background: var(--panel); padding: 4px 18px; margin-bottom: 10px; }
+  summary { cursor: pointer; font-weight: 600; padding: 12px 0; list-style: none; }
+  summary::-webkit-details-marker { display: none; }
+  summary::after { content: "+"; float: right; color: var(--muted); font-family: var(--mono); }
+  details[open] summary::after { content: "–"; }
+  details p { color: var(--muted); margin: 0 0 14px; }
+
+  .final { text-align: center; border: 1px solid var(--line); border-radius: 28px; padding: 56px 20px;
+           background: radial-gradient(600px 240px at 50% 0%, rgba(88,101,242,.22), transparent), var(--bg-2); }
+  .final h2 { margin-top: 0; }
+  .final .install { margin: 22px auto 0; }
+  .final .ctas { justify-content: center; margin-top: 18px; }
+
+  footer { color: var(--muted); font-size: 14px; padding: 40px 0 56px; display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; }
+  footer a { color: var(--muted); }
+
+  @media (max-width: 900px) {
+    .hero { grid-template-columns: minmax(0,1fr); padding-top: 24px; }
+    .profile { margin: 0 auto; }
+    .grid { grid-template-columns: repeat(2, minmax(0,1fr)); }
+  }
+  @media (max-width: 600px) {
+    body { font-size: 16px; }
+    .wrap { padding: 0 16px; }
+    .nav-links { display: none; }
+    .grid, .moods { grid-template-columns: minmax(0,1fr); }
+    .mood img { max-width: 180px; }
+    section { padding: 52px 0; }
+    .ctas .btn { flex: 1; justify-content: center; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; scroll-behavior: auto !important; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <a class="brand" href="#"><img src="assets/favicon.png" alt="">Agent Presence</a>
+    <div class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#install">Install</a>
+      <a href="#faq">FAQ</a>
+      <a href="https://github.com/abelxmendoza/discord-agent-presence">GitHub</a>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <div>
+      <span class="eyebrow"><span class="dot"></span> Discord Rich Presence for AI coding</span>
+      <h1>Your AI agents,<br><span class="grad">live on Discord.</span></h1>
+      <p class="lede">Discord already shows "Playing Visual Studio Code". Agent Presence does the same for <b>Claude, ChatGPT/Codex, Grok, Cursor and VS Code</b>, and adds which projects you're on, how many agents are running and what they're doing right now.</p>
+      <div class="ctas">
+        <a class="btn btn-primary" href="https://github.com/abelxmendoza/discord-agent-presence/releases/latest">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-5-5m5 5l5-5M4 21h16"/></svg>
+          Download
+        </a>
+        <a class="btn btn-ghost" href="https://github.com/abelxmendoza/discord-agent-presence">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5a11.5 11.5 0 00-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.68 0-1.25.45-2.28 1.19-3.08-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 015.78 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.8 1.19 1.83 1.19 3.08 0 4.41-2.69 5.38-5.25 5.67.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0012 .5z"/></svg>
+          View on GitHub
+        </a>
+      </div>
+      <div class="install">
+        <code><span class="p">$ </span><span class="cmd">curl -fsSL https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/install.sh | bash</span></code>
+        <button class="copy" type="button">Copy</button>
+      </div>
+      <p class="small">Linux · X11 · Python 3 · no dependencies · free and open source (MIT)</p>
+    </div>
+
+    <div class="stage" aria-label="Preview of a Discord profile with two Agent Presence cards">
+      <div class="profile">
+        <div class="banner"></div>
+        <div class="who"><div class="avatar"></div></div>
+        <div class="name">you</div>
+        <div class="handle">building with agents</div>
+        <div class="acts">
+          <div class="act" data-card="claude">
+            <div class="act-head" data-verb>Playing</div>
+            <div class="act-body">
+              <div class="art">
+                <img class="large" src="assets/claude_cooking.webp" alt="" width="88" height="88">
+                <div class="badge">⚡</div>
+              </div>
+              <div class="act-text">
+                <div class="act-title">Claude</div>
+                <div class="act-line">▸ px4-autonomous-mission ✦ Omega-Code</div>
+                <div class="act-line rot">⚡ 2 agents cooking (2 of 3)</div>
+                <div class="act-time"><span data-clock>01:42:10</span> elapsed</div>
+              </div>
+            </div>
+            <div class="act-btn">⭐ View on GitHub</div>
+          </div>
+          <div class="act" data-card="chatgpt">
+            <div class="act-head" data-verb>Playing</div>
+            <div class="act-body">
+              <div class="art">
+                <img class="large" src="assets/chatgpt_waiting.webp" alt="" width="88" height="88">
+                <div class="badge">⏳</div>
+              </div>
+              <div class="act-text">
+                <div class="act-title">ChatGPT · Codex</div>
+                <div class="act-line">▸ RealmForge-XR</div>
+                <div class="act-line rot">⏳ 1 agent waiting for me</div>
+                <div class="act-time"><span data-clock>00:27:03</span> elapsed</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </header>
+</div>
+
+<section id="features">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="kicker">What it shows</div>
+      <h2>More than "Playing VS Code"</h2>
+      <p>One card per app, just like Discord's built-in detection. Each card lists your projects, and its second line rotates every 20 seconds through what's actually happening.</p>
+    </div>
+    <div class="grid">
+      <div class="card"><div class="ic">⚡</div><h3>Agents, counted</h3><p>Every Claude Code session, Codex thread and Grok CLI counts. You see who's working and who's waiting for you.</p><div class="ex">⚡ 2 cooking · ⏳ 1 waiting for me</div></div>
+      <div class="card"><div class="ic">🧪</div><h3>What they're doing</h3><p>The agent's latest action becomes the status: editing a file, running tests, building, pushing.</p><div class="ex">🧪 running tests · px4-autonomous-mission</div></div>
+      <div class="card"><div class="ic">✦</div><h3>Every project at once</h3><p>Working on three repos? All three show, ranked by activity, collapsing into "+N more" when it's long.</p><div class="ex">▸ px4 ✦ Omega-Code ✦ +1 more</div></div>
+      <div class="card"><div class="ic">🌿</div><h3>Git at a glance</h3><p>Branch, uncommitted lines, and commits today for the project you're focused on.</p><div class="ex">🌿 feat/waypoint-nav · +159 −18</div></div>
+      <div class="card"><div class="ic">🔥</div><h3>Streaks, models, CI</h3><p>Your day streak, the model in use (Opus, GPT…) and GitHub CI status for public repos.</p><div class="ex">🔥 12-day streak · 🧠 Opus 5.5 · ✅ CI</div></div>
+      <div class="card"><div class="ic">👀</div><h3>Mood verbs</h3><p>"Watching Claude" while agents cook in the background. "Competing in Claude" once you've got 5+ going.</p><div class="ex">Watching Claude</div></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="kicker">Images that change</div>
+      <h2>The card art follows the mood</h2>
+      <p>The big picture shows the app in its current mood. The small badge matches the line underneath it: the agent count, a test tube while tests run, a flame for your streak, a check for green CI.</p>
+    </div>
+    <div class="moods">
+      <div class="mood"><img src="assets/claude_cooking.webp" alt="Claude mascot, glowing" loading="lazy" width="220" height="220"><b>Cooking</b><span>agents are working</span></div>
+      <div class="mood"><img src="assets/claude_waiting.webp" alt="Claude mascot, amber" loading="lazy" width="220" height="220"><b>Waiting</b><span>your turn</span></div>
+      <div class="mood"><img src="assets/claude_idle.webp" alt="Claude mascot, grey" loading="lazy" width="220" height="220"><b>Idle</b><span>app open in the background</span></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="kicker">Works with</div>
+      <h2>The tools you already use</h2>
+    </div>
+    <div class="apps">
+      <div class="app"><span class="swatch" style="background:#f97316"></span>Claude <small>Desktop, Code CLI</small></div>
+      <div class="app"><span class="swatch" style="background:#10b981"></span>ChatGPT · Codex <small>desktop, CLI</small></div>
+      <div class="app"><span class="swatch" style="background:#8b5cf6"></span>Grok Build <small>CLI, Grok app</small></div>
+      <div class="app"><span class="swatch" style="background:#3b82f6"></span>Cursor</div>
+      <div class="app"><span class="swatch" style="background:#0ea5e9"></span>VS Code <small>incl. the Claude extension</small></div>
+    </div>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="kicker">Install</div>
+      <h2>Up and running in about a minute</h2>
+      <p>No Discord developer setup needed. The cards use shared Discord apps that ship with the tool.</p>
+    </div>
+    <div class="steps">
+      <div class="step"><div><h3>Run the installer</h3><p>It clones the tool, adds the <code>agent-presence</code> command and starts it on login.</p>
+        <pre>curl -fsSL https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/install.sh | bash</pre></div></div>
+      <div class="step"><div><h3>Check everything's found</h3><p>It confirms Discord is running and lists which of your AI apps it detected.</p>
+        <pre>agent-presence doctor</pre></div></div>
+      <div class="step"><div><h3>Preview your cards</h3><p>It prints exactly what Discord will show, line by line. Then open your profile and look.</p>
+        <pre>agent-presence detect</pre></div></div>
+    </div>
+  </div>
+</section>
+
+<section id="faq">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="kicker">FAQ</div>
+      <h2>Questions</h2>
+    </div>
+    <details><summary>What does it share? Is any of my code sent anywhere?</summary>
+      <p>No code ever leaves your machine. Only the card text goes to your local Discord app: project names, branch names, file names and commit counts. Anyone who can see your profile can see these. Hide a repo with <code>hide_projects</code>, or turn off any line (<code>show_files</code>, <code>show_git</code>, …) in <code>~/.config/ai-presence/config.json</code>. Commit messages and full paths are never shown.</p></details>
+    <details><summary>How does it know what my agents are doing?</summary>
+      <p>It reads the session logs Claude Code and Codex already write on your machine, and looks at the latest action in each one. For Grok it checks the running CLI process. Window titles show which project is open in Cursor or VS Code.</p></details>
+    <details><summary>Discord already shows VS Code for me. Won't I get two cards?</summary>
+      <p>Turn off Discord's own detection for Visual Studio Code under Settings → Registered Games, and the Agent Presence card, with projects and agents, takes its place.</p></details>
+    <details><summary>Can I rename the cards or use my own icons?</summary>
+      <p>Yes. Create your own application in the Discord Developer Portal and put its ID under <code>client_ids</code>. Point <code>image_base_url</code> at your own art for custom pictures.</p></details>
+    <details><summary>macOS, Windows, Wayland?</summary>
+      <p>Linux on X11 for now. The Discord side works on every platform; detecting the focused window is the platform-specific part. Contributions are welcome.</p></details>
+    <details><summary>Can I add another tool, like Windsurf, Zed or Aider?</summary>
+      <p>Yes. Each tool is a few lines saying how to find its process, window and session logs. Open a pull request on GitHub.</p></details>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="final">
+      <h2>Let your friends watch you <span class="grad">cook</span>.</h2>
+      <p class="small" style="font-size:16px">Free, open source, one command.</p>
+      <div class="install">
+        <code><span class="p">$ </span><span class="cmd">curl -fsSL https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/install.sh | bash</span></code>
+        <button class="copy" type="button">Copy</button>
+      </div>
+      <div class="ctas">
+        <a class="btn btn-primary" href="https://github.com/abelxmendoza/discord-agent-presence/releases/latest">Download</a>
+        <a class="btn btn-ghost" href="https://github.com/abelxmendoza/discord-agent-presence">Star on GitHub</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="wrap">
+  <footer>
+    <span>Made by <a href="https://www.abelxmendoza.com/">Abel Mendoza</a> · MIT License</span>
+    <span>Not affiliated with Discord, Anthropic, OpenAI, xAI, Anysphere or Microsoft.</span>
+  </footer>
+</div>
+
+<script>
+  // Copy buttons
+  document.querySelectorAll(".copy").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const cmd = btn.parentElement.querySelector(".cmd").textContent;
+      try { await navigator.clipboard.writeText(cmd); btn.textContent = "Copied ✓"; btn.classList.add("done"); }
+      catch { btn.textContent = "Select ↑"; }
+      setTimeout(() => { btn.textContent = "Copy"; btn.classList.remove("done"); }, 1800);
+    });
+  });
+
+  // Live mock of the Discord cards: rotating lines, mood images and badges
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const scripts = {
+    claude: [
+      { verb: "Watching", mood: "cooking", badge: "⚡", line: "⚡ 2 cooking · ⏳ 1 waiting for me (2 of 3)" },
+      { verb: "Watching", mood: "cooking", badge: "🧪", line: "🧪 running tests · px4-autonomous-mission" },
+      { verb: "Watching", mood: "cooking", badge: "✍", line: "✍ editing waypoint_nav.py · Omega-Code" },
+      { verb: "Playing",  mood: "cooking", badge: "🌿", line: "🌿 feat/sim-asset-pipeline · +159 −18" },
+      { verb: "Playing",  mood: "waiting", badge: "🔥", line: "🔥 12-day streak · 📦 6 commits today" },
+      { verb: "Playing",  mood: "cooking", badge: "✅", line: "🧠 Opus 5.5 · ✅ CI green" },
+    ],
+    chatgpt: [
+      { verb: "Playing",  mood: "waiting", badge: "⏳", line: "⏳ 1 agent waiting for me" },
+      { verb: "Watching", mood: "cooking", badge: "🔨", line: "🔨 building · RealmForge-XR" },
+      { verb: "Watching", mood: "cooking", badge: "🚀", line: "🚀 pushing · RealmForge-XR" },
+      { verb: "Playing",  mood: "idle",    badge: "💤", line: "○ open in the background" },
+      { verb: "Playing",  mood: "cooking", badge: "🧠", line: "🧠 GPT-6.1 Sol" },
+    ],
+  };
+  document.querySelectorAll("[data-card]").forEach((el, n) => {
+    const name = el.dataset.card, steps = scripts[name];
+    const img = el.querySelector("img.large"), badge = el.querySelector(".badge"),
+          line = el.querySelector(".act-line.rot"), verb = el.querySelector("[data-verb]");
+    steps.forEach(s => { new Image().src = `assets/${name}_${s.mood}.webp`; }); // preload
+    let i = 0;
+    const show = () => {
+      const s = steps[i % steps.length]; i++;
+      line.classList.add("fade");
+      setTimeout(() => {
+        line.textContent = s.line; verb.textContent = s.verb;
+        badge.textContent = s.badge; badge.classList.add("pop");
+        img.src = `assets/${name}_${s.mood}.webp`;
+        line.classList.remove("fade");
+        setTimeout(() => badge.classList.remove("pop"), 300);
+      }, reduce ? 0 : 350);
+    };
+    if (!reduce) setTimeout(() => setInterval(show, 3200), n * 1600);
+  });
+
+  // Elapsed timers tick like Discord's
+  document.querySelectorAll("[data-clock]").forEach(el => {
+    let [h, m, s] = el.textContent.split(":").map(Number), t = h * 3600 + m * 60 + s;
+    setInterval(() => {
+      t++; const p = v => String(v).padStart(2, "0");
+      el.textContent = `${p(Math.floor(t / 3600))}:${p(Math.floor(t / 60) % 60)}:${p(t % 60)}`;
+    }, 1000);
+  });
+</script>
+</body>
+</html>

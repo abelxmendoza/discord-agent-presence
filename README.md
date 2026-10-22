@@ -7,6 +7,7 @@
 <p align="center">
   <a href="https://github.com/abelxmendoza/discord-agent-presence/releases/latest"><img src="https://img.shields.io/badge/⬇_Download-latest_release-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Download latest release"></a>
   <a href="#install"><img src="https://img.shields.io/badge/One--line_install-curl_%7C_bash-22D3EE?style=for-the-badge&logo=gnubash&logoColor=white" alt="One-line install"></a>
+  <a href="https://abelxmendoza.github.io/discord-agent-presence/"><img src="https://img.shields.io/badge/Website-live_demo-F97316?style=for-the-badge&logo=githubpages&logoColor=white" alt="Website"></a>
 </p>
 
 Discord Rich Presence for AI coding tools: **Claude Desktop, ChatGPT / Codex,
