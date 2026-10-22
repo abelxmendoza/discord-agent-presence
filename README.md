@@ -73,6 +73,10 @@ git clone https://github.com/abelxmendoza/discord-agent-presence && ./discord-ag
 | `agent-presence detect` | Previews every card, rotating line and image |
 | `agent-presence setup` / `uninstall` | Adds / removes the login service (`setup --dry-run` to preview) |
 | `agent-presence run` | Runs in the foreground |
+| `agent-presence link` / `link <key>` / `link --off` | Shares one card across your computers |
+| `agent-presence web setup [--readme]` / `web preview` / `web off` | Publishes your status for a README card and website widget |
+| `agent-presence stats [--html]` | Your coding habits, private to this computer |
+| `agent-presence machines` | Shows this computer, your linked ones, and which one has the card |
 
 | | Linux | macOS | Windows |
 |---|---|---|---|
@@ -126,6 +130,122 @@ name is what follows "Playing") and put its Application ID under
 `client_ids.cursor` in the config. That tool then gets its own card and leaves
 the combined one.
 
+### Several computers
+
+Each computer shows which machine it is and its OS: `💻 MacBook Pro · macOS 15`
+(Raspberry Pi and Jetson boards are recognized too). Hover the big picture to
+see the full OS version. Hostnames and serial numbers are never shown; set
+`machine_name` to call it something else.
+
+Run the tool on each computer, then link them with one key:
+
+```bash
+agent-presence link            # on the first computer: prints a key
+agent-presence link <key>      # on each of the others
+agent-presence setup           # restart on each to apply
+```
+
+Linked computers on the same network share **one card**. It sits on whichever
+computer you touched last (keyboard or mouse) and moves about 15 seconds after
+you switch, with a short `↪ moved to MacBook Pro` line. Every machine's agents
+count toward the card, so it reads like:
+
+```
+⚡ 5 agents cooking · Claude 3 · Codex 2
+🖥 2 machines: 💻 MacBook Pro (3) · 🖥 Alienware Aurora R16 (2)
+🖥 Alienware Aurora R16: 2 agents cooking while I'm away
+```
+
+A machine without Discord open (a Jetson running agents over SSH, say) still
+adds its agents but never shows the card itself. Machines share a small signed
+packet over UDP port 47777 on your local network; the key stops other people's
+computers from posting to your card. The first time, macOS asks to allow Python
+to find devices on your local network, and Windows asks to allow it through
+the firewall: say yes. Git lines, streaks and today's tokens come from the
+computer showing the card. Linux reads keyboard/mouse idle time with
+`xprintidle` if installed (`sudo apt install xprintidle`); without it the card
+falls back to whichever Linux machine has the busiest agents.
+
+### Your coding habits (private)
+
+While it runs, it keeps a log of your habits on this computer only
+(`~/.local/state/ai-presence/habits/`, one small file per month): minutes
+coding per hour and day, sessions, projects, tools, models, machines, how many
+agents ran at once, test and build results, commits, tokens and agent time.
+Nothing in it is ever published.
+
+```
+$ agent-presence stats
+  streak        12 days (best 19)
+  today         3h 10m coding · 5h 40m of agent work · 6 commits · 1.2M tokens
+  7 days        31h coding · 52h of agent work · 38 commits
+  sessions      41 in 30 days · average 1h 5m · longest 4h 20m
+  peak time     around 10 PM · most on Tuesdays
+  most agents   5 working at once
+  tests         96 runs · 91% passed
+```
+
+`agent-presence stats --html` opens a private report in your browser with an
+hour-of-day heatmap and a 30-day chart.
+
+### On your GitHub README and website
+
+Discord only has room for a couple of lines. The same status can go on your
+GitHub profile as an image card, and on your own site as a full panel with
+every agent and what it's doing, your projects with branch, diff and CI, which
+computers you're on, and today's agent time, tokens, commits and streak.
+
+```bash
+agent-presence web setup --readme   # then: agent-presence setup  (to restart)
+```
+
+It uses your GitHub CLI login (`gh auth login`), or `--token` with a
+fine-grained token that has *Contents: Read and write* on the repo. It
+publishes `status.json` and `status.svg` to an `agent-presence-status` branch of
+your profile repo (`you/you`, or `--repo owner/name`), as one commit that's
+replaced on every update: no history piles up, and commits off the default
+branch don't count toward your contribution graph. Updates go out when
+something changes (at most every 30 s) and every 2 minutes otherwise, and the
+card says *offline* when you log off. `--readme` asks, then adds the card to
+your profile README between `agent-presence` markers.
+
+README card (GitHub refreshes it every few minutes):
+
+```html
+<a href="https://abelxmendoza.github.io/discord-agent-presence/"><img src="https://raw.githubusercontent.com/YOU/YOU/agent-presence-status/status.svg" alt="What I'm coding right now" width="480"></a>
+```
+
+Any website (a live panel; restyle it with `--ap-*` CSS variables):
+
+```html
+<div data-agent-presence="YOU/YOU"></div>
+<script src="https://abelxmendoza.github.io/discord-agent-presence/embed.js" async></script>
+```
+
+The [website](https://abelxmendoza.github.io/discord-agent-presence/#everywhere)
+writes these for you. `web preview` saves the card and data locally without
+publishing. When several computers are linked, only the one showing the
+Discord card publishes.
+
+**What's public, and what isn't.** The web version is stricter than Discord,
+because anyone can see it:
+
+- Only repos that are **public on GitHub** are named. Private ones show as
+  "a private project", with no branch, and aren't listed.
+- No file names (`web.show_files`), no token counts (`web.show_tokens`), and
+  OS shows its major version only (`macOS 15`); `web.show_machines: false`
+  drops machines entirely.
+- **No clock times.** It says "live" while you code, and otherwise the day you
+  last coded ("today", "yesterday"). The status commit is dated to the day too.
+- From your private habit log, only the highlights in `web.share` go out
+  (streak, best streak, hours this week rounded, commits this week and month,
+  days coded this month, top public project, tests passed). Delete any you
+  don't want.
+- `web.live: false` stops live status entirely and publishes highlights only,
+  so nobody can tell when you're at your computer.
+- `web setup` suggests a fine-grained token that can only write your profile
+  repo, rather than your GitHub CLI login, which can write to every repo.
+
 ### Images that change
 
 Each card has two image slots:
@@ -157,6 +277,10 @@ Presence apps* on.
 | Key | Default | |
 |---|---|---|
 | `hide_projects` | `[]` | Shown as "private project", with no git, CI or button |
+| `show_machine` | `true` | The computer / OS line, and which linked machines are in use |
+| `machine_name` | `""` | What to call this computer; blank = its model |
+| `web` | off | `enabled`, `repo`, `branch`, `name`, `live`, `share`, `show_tokens`, `show_files`, `show_machines`, `every_seconds` for the README card and website widget |
+| `link_key` | `""` | Same key on each computer = one shared card (`agent-presence link`) |
 | `show_project`, `show_files`, `show_git`, `show_stats`, `show_streak`, `show_model`, `show_ci`, `show_milestones` | `true` | Turn each line on or off |
 | `github_button`, `promo_button`, `mood_verbs` | `true` | |
 | `client_ids` | shared apps | Per tool: your own Application ID, a list of IDs for several names, or `"off"`. `combined` is the shared card |
@@ -169,7 +293,9 @@ Presence apps* on.
 
 **Privacy:** everything on the card is visible to anyone who can see your
 profile: project, branch and file names, and commit counts. Commit messages and
-full paths are never shown. No code leaves your machine.
+full paths are never shown, nor are hostnames. No code leaves your machine;
+linked computers share only card-level status with each other on your local
+network.
 
 ## Supported tools
 

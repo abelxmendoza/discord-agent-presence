@@ -198,6 +198,227 @@ class Moods(unittest.TestCase):
         self.assertEqual(ap.pick_name(ap.DEFAULT_CONFIG, self.S([], focused=True), 2), 0)
 
 
+class Machines(unittest.TestCase):
+    def peer(self, mid, idle, discord=True, busy=0, waiting=0, model="Alienware Aurora R16",
+             kind="desktop", tool="chatgpt"):
+        ag = [{"tool": tool, "status": "busy", "action": "✍ editing", "project": "omega",
+               "model": None, "mtime": time.time(), "outcome": None}] * busy + \
+             [{"tool": tool, "status": "waiting", "action": "⏳ waiting for me", "project": "omega",
+               "model": None, "mtime": time.time(), "outcome": None}] * waiting
+        tools = {tool: {"running_since": time.time() - 60, "focused": False, "projects": ["omega"]}} \
+            if ag else {}
+        return {"v": 1, "id": mid, "name": "", "model": model, "chip": "", "kind": kind,
+                "os": "Ubuntu 24.04", "os_full": "Ubuntu 24.04.1 LTS", "idle": idle,
+                "discord": discord, "agents": ag, "tools": tools}
+
+    def test_machine_info_never_uses_hostname(self):
+        m = ap.machine_info()
+        for k in ("id", "model", "kind", "os", "os_full"):
+            self.assertTrue(m[k], k)
+        import platform
+        host = platform.node().split(".")[0]
+        if host and host.lower() not in m["model"].lower().split():
+            self.assertNotEqual(m["model"], host)
+
+    def test_link_signs_and_rejects(self):
+        a = ap.Link("secret-key", port=0, target="127.0.0.1")
+        b = ap.Link("other-key", port=0, target="127.0.0.1")
+        sealed = a.seal({"id": "x", "model": "m"})
+        self.assertEqual(a.open(sealed)["model"], "m")
+        self.assertIsNone(b.open(sealed))                       # wrong key
+        self.assertIsNone(a.open(sealed[:-2] + b"}}"))          # tampered
+        old = a.seal({"id": "x"})
+        import hmac
+        body = json.dumps({"id": "x", "t": time.time() - 600}).encode()
+        stale = hmac.new(a.key, body, "sha256").digest()[:16] + body
+        self.assertIsNone(a.open(stale))                        # replayed
+        self.assertIsNotNone(a.open(old))
+        a.sock.close(), b.sock.close()
+
+    def test_link_round_trip(self):
+        recv = ap.Link("k", port=0, target="127.0.0.1")
+        port = recv.sock.getsockname()[1]
+        send = ap.Link("k", port=0, target="127.0.0.1")
+        send.port = port
+        send.send(self.peer("peer1", 3))
+        send.send(self.peer("me", 3))  # our own packets are ignored
+        for _ in range(20):
+            got = recv.receive("me")
+            if got:
+                break
+            time.sleep(0.05)
+        self.assertEqual([p["id"] for p in got], ["peer1"])
+        recv.sock.close(), send.sock.close()
+
+    def test_leader_follows_input_with_hysteresis(self):
+        me, other = self.peer("me", 300), self.peer("other", 2)
+        self.assertEqual(ap.pick_leader(me, [other]), "other")
+        # Current leader keeps the card until the other is clearly more recent.
+        me["idle"], other["idle"] = 10, 20
+        self.assertEqual(ap.pick_leader(me, [other], current="other"), "other")
+        other["idle"] = 40
+        self.assertEqual(ap.pick_leader(me, [other], current="other"), "me")
+
+    def test_machine_without_discord_never_shows_the_card(self):
+        me, jetson = self.peer("me", 900), self.peer("jetson", 0, discord=False, kind="board")
+        self.assertEqual(ap.pick_leader(me, [jetson]), "me")
+        me["discord"] = False  # nobody has Discord: stay put
+        self.assertEqual(ap.pick_leader(me, [jetson]), "me")
+
+    def test_peer_agents_join_the_card(self):
+        me = self.peer("me", 1, model="MacBook Pro", kind="laptop")
+        other = self.peer("other", 900, busy=2)
+        live = {"claude": {"running_since": time.time(), "focused": True, "projects": ["px4"],
+                           "roots": {}, "agents": [{"tool": "claude", "status": "busy",
+                                                    "action": "🧪 running tests", "project": "px4",
+                                                    "model": None, "mtime": time.time(),
+                                                    "outcome": None}]}}
+        live = ap.merge_peers(live, [other])
+        self.assertEqual(len(live["chatgpt"]["agents"]), 2)
+        machines = ap.machines_summary(me, [other], ap.DEFAULT_CONFIG)
+        acts, cards = ap.activities(ap.DEFAULT_CONFIG, 0, live, set(), machines)
+        lines = [ln["text"] for ln in ap.card_lines(ap.DEFAULT_CONFIG, *cards["combined"], 0, machines)[0]]
+        self.assertTrue(any(t.startswith("⚡ 3 agents cooking") for t in lines), lines)
+        self.assertIn("🖥 2 machines: 💻 MacBook Pro · 🖥 Alienware Aurora R16 (2)", lines)
+        self.assertIn("🖥 Alienware Aurora R16: 2 agents cooking while I'm away", lines)
+        self.assertIn("on MacBook Pro", acts["combined"]["assets"]["large_text"])
+
+    def test_single_machine_and_switch_lines(self):
+        me = self.peer("me", 1, model="MacBook Pro", kind="laptop")
+        me["os"], me["os_full"] = "macOS 15", "macOS Sequoia 15.2"
+        machines = ap.machines_summary(me, [], ap.DEFAULT_CONFIG)
+        self.assertEqual(ap.machine_lines(ap.DEFAULT_CONFIG, machines),
+                         [("💻 MacBook Pro · macOS 15", "MacBook Pro · macOS Sequoia 15.2")])
+        lines = ap.card_lines(ap.DEFAULT_CONFIG, "claude",
+                              {"agents": [], "focused": True, "projects": [], "roots": {},
+                               "running_since": time.time()}, 0, machines, "MacBook Pro")[0]
+        self.assertEqual(lines[0]["text"], "↪ moved to MacBook Pro")
+        self.assertEqual(ap.machine_lines({**ap.DEFAULT_CONFIG, "show_machine": False}, machines), [])
+
+
+class Web(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.saved = ap.HABITS_DIR, ap.WEB_STATE
+        ap.HABITS_DIR, ap.WEB_STATE = self.tmp / "habits", self.tmp / "web.json"
+
+    def tearDown(self):
+        ap.HABITS_DIR, ap.WEB_STATE = self.saved
+
+    def agent(self, project, public=False, action="✍ editing nav.cpp", status="busy"):
+        return {"tool": "claude", "status": status, "action": action, "project": project,
+                "public": public, "model": "claude-opus-5-5", "mtime": time.time(),
+                "outcome": None, "cwd": None}
+
+    def live(self, *agents):
+        return {"claude": {"running_since": time.time() - 600, "focused": False,
+                           "projects": [a["project"] for a in agents], "roots": {},
+                           "agents": list(agents)}}
+
+    def test_private_repos_files_and_times_stay_off(self):
+        cfg = {**ap.DEFAULT_CONFIG, "hide_projects": ["secret"]}
+        live = self.live(self.agent("omega-1", public=True), self.agent("employer-api"),
+                         self.agent("secret"))
+        st = ap.web_status(cfg, live)
+        self.assertEqual(st["state"], "vibe-coding")
+        self.assertEqual(sorted(a["project"] for a in st["agents"]),
+                         ["a private project", "a private project", "omega-1"])
+        self.assertEqual({a["action"] for a in st["agents"]}, {"✍ editing"})
+        self.assertEqual([p["name"] for p in st["projects"]], ["omega-1"])  # private ones aren't listed
+        blob = json.dumps(st)
+        for leak in ("employer-api", "secret", "nav.cpp", "since", "os_full"):
+            self.assertNotIn(leak, blob)
+        self.assertNotIn("tokens", st["today"])  # off by default on the web
+        off = ap.web_status(cfg, {}, state="offline")
+        self.assertEqual(off["last_active"], "today")
+        self.assertEqual(off["updated"], int(ap._midnight()))  # no exact sign-off time
+
+    def test_svg_is_valid_escaped_and_clock_free(self):
+        import xml.etree.ElementTree as ET
+        cfg = {**ap.DEFAULT_CONFIG, "web": {**ap.DEFAULT_CONFIG["web"], "name": "A&B"}}
+        svg = ap.render_svg(ap.web_status(cfg, self.live(self.agent("px4 <x>", public=True))))
+        ET.fromstring(svg)
+        self.assertIn("A&amp;B is vibe coding", svg)
+        self.assertIn("px4 &lt;x&gt;", svg)
+        off = ap.render_svg(ap.web_status(cfg, {}, state="offline"))
+        ET.fromstring(off)
+        self.assertNotRegex(off, r"\d{1,2}:\d{2}")  # no clock times anywhere
+
+    def test_readme_snippet_insert_and_replace(self):
+        md, _ = ap.web_snippets("me/me")
+        text = "# Hi there\nI build robots.\n"
+        once = ap.insert_snippet(text, md)
+        self.assertTrue(once.startswith("# Hi there\n\n<!-- agent-presence:start -->"))
+        self.assertIn("I build robots.", once)
+        self.assertEqual(ap.insert_snippet(once, md), once)
+        newer = md.replace("width=\"480\"", "width=\"400\"")
+        self.assertEqual(ap.insert_snippet(once, newer).count("agent-presence:start"), 1)
+        self.assertTrue(ap.insert_snippet("", md).startswith("<!-- agent-presence:start -->"))
+
+    def test_publish_makes_one_parentless_day_dated_commit(self):
+        calls = []
+
+        def fake(token, method, path, body=None, timeout=15):
+            calls.append((method, path, body))
+            if path.endswith("/git/refs/heads/agent-presence-status"):
+                raise ap.urllib.error.HTTPError(path, 422, "no ref", {}, None)
+            return {"sha": "abc"}
+        real, ap.github_call = ap.github_call, fake
+        try:
+            ap.publish_files("t", "me/me", "agent-presence-status", {"status.json": "{}"})
+        finally:
+            ap.github_call = real
+        self.assertEqual([c[0] for c in calls], ["POST", "POST", "PATCH", "POST"])
+        self.assertEqual(calls[1][2]["parents"], [])
+        self.assertTrue(calls[1][2]["committer"]["date"].endswith("T00:00:00Z"))
+        self.assertEqual(calls[3][2]["ref"], "refs/heads/agent-presence-status")
+
+    def test_habits_record_sessions_outcomes_and_summary(self):
+        h = ap.Habits()
+        base = (int(time.time() // 60) - 120) * 60  # on a minute boundary, earlier today
+        if time.localtime(base).tm_yday != time.localtime().tm_yday:
+            self.skipTest("too close to midnight")
+        ok = {"kind": "tests", "ok": True, "t": time.time() - 60}
+        live = self.live(self.agent("omega-1"))
+        live["claude"]["agents"][0]["outcome"] = ok
+        for i in range(10):                      # 10 active minutes
+            h.record(ap.DEFAULT_CONFIG, live, "MacBook Pro", base + i * 60)
+        self.assertFalse(h.record(ap.DEFAULT_CONFIG, live, "MacBook Pro", base + 9 * 60 + 5))  # same minute
+        for i in range(40, 45):                  # back after a 30-minute gap
+            h.record(ap.DEFAULT_CONFIG, live, "MacBook Pro", base + i * 60)
+        rec = ap.load_habits(1)[date_today()]
+        self.assertEqual(rec["active_minutes"], 15)
+        self.assertEqual(len(rec["sessions"]), 2)
+        self.assertEqual(rec["outcomes"], {"tests_pass": 1})  # counted once
+        self.assertEqual(rec["projects"]["omega-1"], 15)
+        self.assertEqual(rec["machines"]["MacBook Pro"], 15)
+        s = ap.habit_summary()
+        self.assertEqual(s["today"]["sessions"], 2)
+        self.assertEqual(s["today"]["longest_session"], 10)
+        self.assertGreaterEqual(s["streak"], 1)
+        self.assertIn("My coding habits", ap.habits_html(s))
+
+    def test_streaks_and_shared_highlights(self):
+        from datetime import date, timedelta
+        d = date.today()
+        days = {(d - timedelta(days=i)).isoformat() for i in range(4)} | \
+               {(d - timedelta(days=i)).isoformat() for i in range(10, 16)}
+        self.assertEqual(ap._streaks(days), (4, 6))
+        summary = {"streak": 4, "best_streak": 6,
+                   "week": {"active_minutes": 600, "commits": 12, "tokens": 5_000_000},
+                   "month": {"commits": 40, "days": 18, "tests_run": 20, "outcomes": {"tests_pass": 18}}}
+        cfg = {**ap.DEFAULT_CONFIG, "web": {**ap.DEFAULT_CONFIG["web"], "share": ["streak", "week_hours"]}}
+        self.assertEqual([h["key"] for h in ap.web_highlights(cfg, summary)], ["streak", "week_hours"])
+        keys = [h["key"] for h in ap.web_highlights(ap.DEFAULT_CONFIG, summary)]
+        self.assertNotIn("tokens", keys)
+        self.assertIn("tests", keys)
+
+
+def date_today():
+    from datetime import date
+    return date.today().isoformat()
+
+
 class Platform(unittest.TestCase):
     def test_process_table_sees_this_process(self):
         procs, kids = ap.proc_table()
