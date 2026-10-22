@@ -530,7 +530,7 @@ def resolve_project(cwd):
     if "scratch-workspaces" in parts or any(
             a == "documents" and b == "codex" for a, b in zip(parts, parts[1:])):
         return None, None
-    if p == HOME:
+    if p == HOME or any(p == h for _, h in wsl_homes()):
         return None, None
     root = p
     for parent in [p, *p.parents]:  # prefer the git repo root
@@ -909,6 +909,52 @@ def gemini_agent(f, mtime, cwd_by_hash, cfg):
     return info
 
 
+def wsl_homes():
+    """[(distro root, home)] for each user home in the WSL distros that are
+    running, on Windows. Agents run in WSL keep their logs there."""
+    if not IS_WIN:
+        return []
+
+    def fetch():
+        try:
+            out = subprocess.run(["wsl.exe", "-l", "--running", "-q"], capture_output=True,
+                                 timeout=5, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+        except Exception:
+            return []
+        text = out.decode("utf-16-le", "ignore") if b"\x00" in out else out.decode("utf-8", "ignore")
+        homes = []
+        for distro in filter(None, (x.strip().strip("\x00\ufeff") for x in text.splitlines())):
+            for root in (rf"\\wsl.localhost\{distro}", rf"\\wsl$\{distro}"):
+                try:
+                    found = [h for h in (Path(root) / "home").iterdir() if h.is_dir()]
+                except OSError:
+                    continue
+                try:
+                    if (Path(root) / "root").is_dir():  # agents run as root in minimal distros
+                        found.append(Path(root) / "root")
+                except OSError:
+                    pass
+                homes += [(root, h) for h in found]
+                break
+        return homes
+    return cached(CACHE, ("wsl",), 60, fetch)
+
+
+def agent_homes():
+    """[(WSL distro root or None, home)] to look for agent logs in."""
+    return [(None, HOME)] + wsl_homes()
+
+
+def wsl_path(root, path):
+    """A Linux path from inside WSL as Windows can open it."""
+    if not root or not path or not path.startswith("/"):
+        return path
+    m = re.match(r"/mnt/([a-zA-Z])(/.*)?$", path)
+    if m:
+        return m.group(1).upper() + ":\\" + (m.group(2) or "").lstrip("/").replace("/", "\\")
+    return root + path.replace("/", "\\")
+
+
 def gather_agents(cfg, procs=None):
     now = time.time()
     keep = now - max(cfg["agent_active_seconds"], cfg["agent_waiting_seconds"])
@@ -919,28 +965,33 @@ def gather_agents(cfg, procs=None):
         return age < (cfg["agent_waiting_seconds"] if a["status"] == "waiting"
                       else cfg["agent_active_seconds"])
 
-    for base in HOME.glob(".claude*/projects"):
-        for f in base.glob("*/*.jsonl"):
-            try:
-                m = f.stat().st_mtime
-            except OSError:
-                continue
-            if m >= keep:
-                a = claude_agent(f, m, cfg)
-                if wanted(a):
-                    agents.append(a)
-    sessions = HOME / ".codex/sessions"
-    if sessions.exists():
-        for d in sorted(sessions.glob("*/*/*"))[-2:]:  # rollouts are date-sharded
-            for f in d.glob("rollout-*.jsonl"):
+    for root, home in agent_homes():
+        found = []
+        for base in home.glob(".claude*/projects"):
+            for f in base.glob("*/*.jsonl"):
                 try:
                     m = f.stat().st_mtime
                 except OSError:
                     continue
                 if m >= keep:
-                    a = codex_agent(f, m, cfg)
+                    a = claude_agent(f, m, cfg)
                     if wanted(a):
-                        agents.append(a)
+                        found.append(a)
+        sessions = home / ".codex/sessions"
+        if sessions.exists():
+            for d in sorted(sessions.glob("*/*/*"))[-2:]:  # rollouts are date-sharded
+                for f in d.glob("rollout-*.jsonl"):
+                    try:
+                        m = f.stat().st_mtime
+                    except OSError:
+                        continue
+                    if m >= keep:
+                        a = codex_agent(f, m, cfg)
+                        if wanted(a):
+                            found.append(a)
+        for a in found:
+            a["cwd"] = wsl_path(root, a["cwd"])
+        agents += found
 
     # Gemini names project folders by sha256 of the project root; map the
     # hashes back using the working dirs of running gemini processes.
@@ -1125,22 +1176,23 @@ def today_stats(every=60):
     if now - STATS_AT[0] >= every:
         STATS_AT[0] = now
         midnight = _midnight()
-        for base in HOME.glob(".claude*/projects"):
-            for f in base.glob("*/*.jsonl"):
-                try:
-                    if f.stat().st_mtime >= midnight:
-                        _scan(f, "claude", "claude", midnight)
-                except OSError:
-                    pass
-        sessions = HOME / ".codex/sessions"
-        if sessions.exists():
-            for d in sorted(sessions.glob("*/*/*"))[-2:]:
-                for f in d.glob("rollout-*.jsonl"):
+        for _, home in agent_homes():
+            for base in home.glob(".claude*/projects"):
+                for f in base.glob("*/*.jsonl"):
                     try:
                         if f.stat().st_mtime >= midnight:
-                            _scan(f, "chatgpt", "codex", midnight)
+                            _scan(f, "claude", "claude", midnight)
                     except OSError:
                         pass
+            sessions = home / ".codex/sessions"
+            if sessions.exists():
+                for d in sorted(sessions.glob("*/*/*"))[-2:]:
+                    for f in d.glob("rollout-*.jsonl"):
+                        try:
+                            if f.stat().st_mtime >= midnight:
+                                _scan(f, "chatgpt", "codex", midnight)
+                        except OSError:
+                            pass
     out = {}
     for st in STATS.values():
         secs, tok = out.get(st["tool"], (0.0, 0))
