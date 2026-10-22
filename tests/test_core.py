@@ -24,7 +24,7 @@ def now_iso():
 
 def write_jsonl(recs, suffix=".jsonl"):
     f = tempfile.NamedTemporaryFile("w", suffix=suffix, delete=False, encoding="utf-8")
-    f.write("\n".join(json.dumps(r) for r in recs))
+    f.write("".join(json.dumps(r) + "\n" for r in recs))  # logs end each line
     f.close()
     return Path(f.name)
 
@@ -110,6 +110,44 @@ class Transcripts(unittest.TestCase):
         a = ap.gemini_agent(f, time.time(), {}, self.cfg)
         self.assertEqual(a["action"], "🧪 running tests")
         self.assertEqual(a["status"], "busy")
+
+
+class StatsAndMilestones(unittest.TestCase):
+    def test_human_formats(self):
+        self.assertEqual(ap.human_tokens(3_612_345), "3.6M")
+        self.assertEqual(ap.human_tokens(1_000_000), "1M")
+        self.assertEqual(ap.human_tokens(950), "950")
+        self.assertEqual(ap.human_duration(12660), "3h 31m")
+
+    def test_claude_tokens_and_time_counted_once_per_reply(self):
+        t0 = time.time()
+        def rec(dt, mid, out):
+            ts = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(t0 + dt))
+            return {"type": "assistant", "cwd": "/x", "timestamp": ts, "message": {
+                "id": mid, "usage": {"input_tokens": 10, "output_tokens": out,
+                                     "cache_creation_input_tokens": 0, "cache_read_input_tokens": 99999}}}
+        # m1 is logged twice (two content blocks); the 10-minute gap isn't agent time
+        f = write_jsonl([rec(-700, "m1", 100), rec(-690, "m1", 100), rec(-680, "m2", 50), rec(-60, "m3", 5)])
+        ap.STATS.clear()
+        ap._scan(f, "claude", "claude", t0 - 3600)
+        st = ap.STATS[f]
+        self.assertEqual(st["tokens"], 110 + 60 + 15)   # cache reads excluded, m1 once
+        self.assertAlmostEqual(st["secs"], 20, delta=1)  # only the two short gaps
+
+    def test_commit_milestone(self):
+        import shutil, subprocess
+        if not shutil.which("git"):
+            self.skipTest("git not installed")
+        repo = tempfile.mkdtemp()
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_COMMITTER_NAME": "t",
+               "GIT_AUTHOR_EMAIL": ap.git_user_email() or "t@example.com",
+               "GIT_COMMITTER_EMAIL": ap.git_user_email() or "t@example.com"}
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        for i in range(10):
+            subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", f"c{i}"], cwd=repo, env=env, check=True)
+        ap.CACHE.clear()
+        found = ap.milestones(ap.DEFAULT_CONFIG, {"roots": {"r": repo}, "agents": []}, 0)
+        self.assertIn("🏆 10th commit today", [t for t, _ in found])
 
 
 class Moods(unittest.TestCase):

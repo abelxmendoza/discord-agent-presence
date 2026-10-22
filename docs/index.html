@@ -247,6 +247,7 @@
               </div>
             </div>
             <div class="act-btn">⭐ View on GitHub</div>
+            <div class="act-btn" style="margin-top:6px">🤖 Get Agent Presence</div>
           </div>
           <div class="act" data-card="chatgpt">
             <div class="act-head" data-verb>Playing</div>
@@ -281,7 +282,8 @@
       <div class="card"><div class="ic">🧪</div><h3>What they're doing</h3><p>The agent's latest action becomes the status: editing a file, running tests, building, pushing.</p><div class="ex">🧪 running tests · px4-autonomous-mission</div></div>
       <div class="card"><div class="ic">✦</div><h3>Every project at once</h3><p>Working on three repos? All three show, ranked by activity, collapsing into "+N more" when it's long.</p><div class="ex">▸ px4 ✦ Omega-Code ✦ +1 more</div></div>
       <div class="card"><div class="ic">🌿</div><h3>Git at a glance</h3><p>Branch, uncommitted lines, and commits today for the project you're focused on.</p><div class="ex">🌿 feat/waypoint-nav · +159 −18</div></div>
-      <div class="card"><div class="ic">🔥</div><h3>Streaks, models, CI</h3><p>Your day streak, the model in use (Opus, GPT…) and GitHub CI status for public repos.</p><div class="ex">🔥 12-day streak · 🧠 Opus 5.5 · ✅ CI</div></div>
+      <div class="card"><div class="ic">⏱</div><h3>Today's stats</h3><p>How long your agents worked today and how many tokens they burned, plus your streak, the model and CI status.</p><div class="ex">⏱ 3h 31m of agent time · 💸 3.6M tokens</div></div>
+      <div class="card"><div class="ic">🎉</div><h3>Milestones</h3><p>A PR gets merged, you hit your 100th commit of the month, or you set a new streak record. The card celebrates it for ten minutes.</p><div class="ex">🎉 PR #42 merged · px4-autonomous-mission</div></div>
       <div class="card"><div class="ic">👀</div><h3>A card that renames itself</h3><p>"Playing Coding" while you type. "Watching Vibe Coding" while your agents do the work. "Competing in" once you've got 5+ going.</p><div class="ex">Watching Vibe Coding</div></div>
     </div>
   </div>
@@ -418,6 +420,8 @@
       { verb: "Watching", name: "Vibe Coding", mood: "success", badge: "✅", line: "✅ tests passed" },
       { verb: "Watching", name: "Vibe Coding", mood: "push",    badge: "🚀", line: "🚀 pushing · px4-autonomous-mission" },
       { verb: "Playing",  name: "Coding",      mood: "waiting", badge: "⏳", line: "⏳ 1 agent waiting for me" },
+      { verb: "Playing",  name: "Coding",      mood: "success", badge: "🎉", line: "🎉 PR #42 merged · px4-autonomous-mission" },
+      { verb: "Playing",  name: "Coding",      mood: "waiting", badge: "⏱", line: "⏱ 3h 31m of agent time today · 💸 3.6M tokens" },
       { verb: "Playing",  name: "Coding",      mood: "cooking", badge: "🔥", line: "🔥 12-day streak · 📦 6 commits today" },
       { verb: "Playing",  name: "Coding",      mood: "idle",    badge: "🧠", line: "🧠 Opus 5.5 · ✅ CI green" },
     ],

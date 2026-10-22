@@ -45,6 +45,11 @@ Watching Claude
 - **Streak.** Consecutive days with commits or an active card.
 - **Pass / fail.** The result of the newest test or build run each agent did,
   read from its command exit codes: ✅ tests passed / ❌ build failed.
+- **Today's stats.** Agent time and tokens since midnight, per app
+  (`⏱ 3h 31m of agent time today · 💸 3.6M tokens`). Tokens count new work
+  (input + output + cache writes), not cache re-reads.
+- **Milestones.** For 10 minutes after they happen: `🎉 PR #42 merged`,
+  `🏆 100th commit this month`, `🏆 10th commit today`, `🔥 new record: 12-day streak`.
 - **Model and CI.** The model in use (Opus 5.5, GPT-…). CI status comes from the
   GitHub check runs, for public repos only.
 - **A card that renames itself.** Give a card two Discord apps, e.g. `Coding`
@@ -53,8 +58,9 @@ Watching Claude
   cycle). The timer carries over when it switches.
 - **Mood verb.** **Watching** while agents work and you're in another window,
   **Competing in** at 5+ agents, otherwise **Playing**.
-- **GitHub button** on public repos. Other people can click it; Discord doesn't
-  show buttons on your own card.
+- **Buttons:** your repo on GitHub (public repos only) and "🤖 Get Agent
+  Presence", which links to the install page. Other people can click them;
+  Discord doesn't show buttons on your own card.
 
 **Linux, macOS and Windows.** Python 3.9+. No dependencies on Linux (it uses
 `/proc` and `xprop`); macOS and Windows use `psutil`, which the installer sets up.
@@ -157,7 +163,7 @@ spot in the member list.
 | `agent_waiting_seconds` | 1800 | How long a finished agent shows as "waiting for me" |
 | `hide_projects` | [] | Shown as "private project"; no git/CI/button for them |
 | `show_project`, `show_files`, `show_git`, `show_streak`, `show_model`, `show_ci` | true | Toggle each line |
-| `github_button`, `mood_verbs` | true | |
+| `github_button`, `promo_button`, `mood_verbs`, `show_stats`, `show_milestones` | true | |
 | `client_ids` | shared apps | Your own Application ID per app, or `"off"` |
 | `images` | `"url"` | `"url"` (PNGs at `image_base_url`), `"assets"` (uploaded per Discord app) or `"none"` |
 

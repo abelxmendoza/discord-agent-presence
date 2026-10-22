@@ -61,6 +61,10 @@ DEFAULT_CONFIG = {
     "show_model": True,
     "show_ci": True,          # public GitHub repos only
     "github_button": True,    # public GitHub repos only
+    "promo_button": True,     # 2nd button: "Get Agent Presence" -> landing page
+    "show_stats": True,       # "⏱ 3h 40m of agent time today · 💸 1.2M tokens"
+    "show_milestones": True,  # "🎉 PR #42 merged", "🏆 100th commit this month"
+    "milestone_seconds": 600, # how long a milestone stays on the card
     "mood_verbs": True,       # Watching / Competing in, instead of always Playing
     # Big picture switches to <app>_failed / <app>_success after a test or
     # build run, for this long.
@@ -96,6 +100,8 @@ SHARED_CLIENT_IDS = {
     "kiro": "",
     "vscode": "",
 }
+
+LANDING_URL = "https://abelxmendoza.github.io/discord-agent-presence/"
 
 TOOLS = ["claude", "chatgpt", "grok", "gemini", "muse", "copilot", "opencode", "aider",
          "cursor", "windsurf", "kiro", "vscode"]
@@ -954,6 +960,169 @@ def update_streak(live_today, roots):
     return streak
 
 
+# ---------------------------------------------------------- today stats ----
+# Agent time and tokens since midnight, read incrementally from the logs.
+
+STATS = {}          # path -> per-file running totals for today
+STATS_AT = [0.0]    # last refresh
+ACTIVE_GAP = 120    # seconds between log entries that still count as working
+
+
+def _midnight():
+    from datetime import datetime
+    return datetime.combine(date.today(), datetime.min.time()).timestamp()
+
+
+def _scan(path, tool, kind, midnight):
+    """Read new lines of one log and fold them into STATS[path]."""
+    st = STATS.get(path)
+    if not st or st["day"] != midnight:
+        st = STATS[path] = {"day": midnight, "offset": 0, "tool": tool, "secs": 0.0,
+                            "tokens": 0, "last": None, "seen": set(), "codex_total": 0}
+    try:
+        size = path.stat().st_size
+        if size < st["offset"]:
+            st["offset"] = 0
+        with open(path, "rb") as f:
+            f.seek(st["offset"])
+            chunk = f.read()
+    except OSError:
+        return
+    end = chunk.rfind(b"\n") + 1  # leave a half-written last line for next time
+    st["offset"] += end
+    for raw in chunk[:end].splitlines():
+        try:
+            r = json.loads(raw)
+        except ValueError:
+            continue
+        t = iso_time(r.get("timestamp"))
+        if not t or t < midnight:
+            continue
+        if kind == "claude" and r.get("cwd") and st["tool"] == "claude":
+            st["tool"] = CLAUDE_ENTRYPOINTS.get(r.get("entrypoint"), "claude")
+        if st["last"] and 0 < t - st["last"] < ACTIVE_GAP:
+            st["secs"] += t - st["last"]
+        st["last"] = max(t, st["last"] or t)
+        if kind == "claude":
+            msg = r.get("message") or {}
+            u = msg.get("usage")
+            # A reply is logged once per content block; count its usage once.
+            if u and msg.get("id") not in st["seen"]:
+                st["seen"].add(msg.get("id"))
+                st["tokens"] += (u.get("input_tokens", 0) + u.get("output_tokens", 0)
+                                 + u.get("cache_creation_input_tokens", 0))
+        else:
+            info = (r.get("payload") or {}).get("info") or {}
+            tot = (info.get("total_token_usage") or {})
+            if tot:
+                st["codex_total"] = (tot.get("input_tokens", 0) - tot.get("cached_input_tokens", 0)
+                                     + tot.get("output_tokens", 0))
+                st["tokens"] = st["codex_total"]
+
+
+def today_stats(every=60):
+    """{tool: (agent_seconds, tokens)} for today. Refreshes at most once a minute."""
+    now = time.time()
+    if now - STATS_AT[0] >= every:
+        STATS_AT[0] = now
+        midnight = _midnight()
+        for base in HOME.glob(".claude*/projects"):
+            for f in base.glob("*/*.jsonl"):
+                try:
+                    if f.stat().st_mtime >= midnight:
+                        _scan(f, "claude", "claude", midnight)
+                except OSError:
+                    pass
+        sessions = HOME / ".codex/sessions"
+        if sessions.exists():
+            for d in sorted(sessions.glob("*/*/*"))[-2:]:
+                for f in d.glob("rollout-*.jsonl"):
+                    try:
+                        if f.stat().st_mtime >= midnight:
+                            _scan(f, "chatgpt", "codex", midnight)
+                    except OSError:
+                        pass
+    out = {}
+    for st in STATS.values():
+        secs, tok = out.get(st["tool"], (0.0, 0))
+        out[st["tool"]] = (secs + st["secs"], tok + st["tokens"])
+    return out
+
+
+def human_tokens(n):
+    for unit, size in (("B", 1e9), ("M", 1e6), ("K", 1e3)):
+        if n >= size:
+            v = n / size
+            return f"{v:.1f}{unit}".replace(".0" + unit, unit)
+    return str(n)
+
+
+def human_duration(secs):
+    h, m = int(secs // 3600), int(secs % 3600 // 60)
+    return f"{h}h {m}m" if h else f"{m}m"
+
+
+# ----------------------------------------------------------- milestones ----
+
+MONTH_MARKS = (25, 50, 100, 150, 200, 300, 500)
+DAY_MARKS = (10, 25, 50)
+
+
+def commit_times(root, since):
+    def fetch():
+        out = run("git", "log", f"--since={since}", f"--author={git_user_email()}",
+                  "--all", "--format=%ct", cwd=root)
+        return sorted(int(x) for x in out.split() if x.isdigit())
+    return cached(CACHE, ("ctimes", root, since), 60, fetch)
+
+
+def milestones(cfg, s, streak):
+    """Recent achievements for this card, newest first: [(text, badge)]."""
+    hidden, window, now = set(cfg["hide_projects"]), cfg["milestone_seconds"], time.time()
+    found = []
+    roots = [r for p, r in s["roots"].items() if p not in hidden]
+
+    # Commit counts crossing round numbers (this month / today), across the card's repos.
+    for since, marks, label in ((date.today().replace(day=1).isoformat(), MONTH_MARKS, "this month"),
+                                ("midnight", DAY_MARKS, "today")):
+        times = sorted(t for r in roots for t in commit_times(r, since))
+        for n in marks:
+            if len(times) >= n and now - times[n - 1] < window:
+                found.append((times[n - 1], f"🏆 {n}th commit {label}", "streak_big"))
+
+    # A new longest streak (the record is kept next to the day log).
+    rec_path = STATE_DIR / "record.json"
+    try:
+        rec = json.loads(rec_path.read_text())
+    except (OSError, ValueError):
+        rec = {"best": 0, "set_at": 0}
+    if streak > rec["best"]:
+        if rec["best"]:  # don't celebrate the very first run
+            rec["set_at"] = now
+        rec["best"] = streak
+        try:
+            rec_path.write_text(json.dumps(rec))
+        except OSError:
+            pass
+    if rec.get("set_at") and now - rec["set_at"] < window:
+        found.append((rec["set_at"], f"🔥 new record: {streak}-day streak", "streak_big"))
+
+    # Your pull requests merged on public GitHub repos.
+    for p, r in s["roots"].items():
+        if p in hidden:
+            continue
+        slug = github_slug(r)
+        if not slug or not github_public(slug):
+            continue
+        pulls = cached(CACHE, ("pulls", slug), 300, lambda: gh_api(
+            f"/repos/{slug}/pulls?state=closed&sort=updated&direction=desc&per_page=10")) or []
+        for pr in pulls if isinstance(pulls, list) else []:
+            t = iso_time(pr.get("merged_at")) if pr.get("merged_at") else None
+            if t and now - t < window:
+                found.append((t, f"🎉 PR #{pr.get('number')} merged · {p}", "ci_green"))
+    return [(text, badge) for _, text, badge in sorted(found, reverse=True)]
+
+
 # ------------------------------------------------------------ snapshot ----
 
 def snapshot(cfg):
@@ -1142,6 +1311,11 @@ def card_lines(cfg, tool, s, streak):
         lines.append({"text": clip(text), "badge": badge, "hover": hover or text,
                       "party": party})
 
+    # 0. Fresh milestones go first, so they're the next thing shown.
+    if cfg["show_milestones"]:
+        for text, badge in milestones(cfg, s, streak)[:2]:
+            add(text, badge)
+
     # 1. Agent headline, with Discord's "(2 of 3)" party counter.
     if agents:
         if busy and waiting:
@@ -1169,6 +1343,17 @@ def card_lines(cfg, tool, s, streak):
                  ("build", True): "✅ build passed", ("build", False): "❌ build failed",
                  ("push", True): "🚀 pushed", ("push", False): "❌ push rejected"}[(o["kind"], o["ok"])]
         add(label, "ci_green" if o["ok"] else "ci_fail")
+
+    # 3b. Agent time and tokens today for this app.
+    if cfg["show_stats"]:
+        secs, tok = today_stats().get(tool, (0, 0))
+        bits = []
+        if secs >= 60:
+            bits.append(f"⏱ {human_duration(secs)} of agent time today")
+        if tok:
+            bits.append(f"💸 {human_tokens(tok)} tokens")
+        if bits:
+            add(" · ".join(bits), "act_working")
 
     # 4. Git for the top project, then streak / commits, then model + CI.
     top = next((p for p in s["projects"] if p not in hidden and s["roots"].get(p)), None)
@@ -1239,10 +1424,15 @@ def build_activity(cfg, tool, s, totals, streak, tick):
     if line["party"]:
         act["party"] = {"id": f"ai-presence-{tool}", "size": line["party"]}
 
+    buttons = []
     if cfg["github_button"] and slug and top and github_public(slug):
         label = f"⭐ {top} on GitHub"
-        act["buttons"] = [{"label": label if len(label) <= 32 else "⭐ View on GitHub",
-                           "url": f"https://github.com/{slug}"}]
+        buttons.append({"label": label if len(label) <= 32 else "⭐ View on GitHub",
+                        "url": f"https://github.com/{slug}"})
+    if cfg["promo_button"]:
+        buttons.append({"label": "🤖 Get Agent Presence", "url": LANDING_URL})
+    if buttons:
+        act["buttons"] = buttons[:2]
 
     # Big picture: the app in its current mood. Small badge: follows the line.
     m = mood(s, cfg)
