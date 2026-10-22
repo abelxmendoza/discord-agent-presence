@@ -1838,7 +1838,7 @@ def stop_running_copies():
                 pass
 
 
-def cmd_setup(dry_run=False):
+def cmd_setup(dry_run=False, quiet=False):
     import shutil
     load_config()  # writes a default config if missing
     py = sys.executable
@@ -1898,7 +1898,10 @@ WantedBy=graphical-session.target
         stop_running_copies()
         subprocess.Popen([pyw, str(SCRIPT), "run"], close_fds=True,
                          creationflags=0x00000008 | 0x08000000)  # detached, no window
-    print("Installed and started. It will start on every login.\n")
+    print("Installed and started. It will start on every login.")
+    if quiet:  # the macOS installer app shows its own summary
+        return
+    print()
     cmd_doctor()
     print("\nPreview your cards:  agent-presence detect"
           f"\nLive log:            {log_hint()}")
@@ -1927,11 +1930,12 @@ def cli():
     sub.add_parser("detect", help="preview every card and rotating line")
     sp = sub.add_parser("setup", help="install and start the login service")
     sp.add_argument("--dry-run", action="store_true", help="print what would be installed")
+    sp.add_argument("--quiet", action="store_true", help="skip the doctor report afterwards")
     sub.add_parser("uninstall", help="stop and remove the login service")
     sub.add_parser("doctor", help="check Discord, window detection and which apps are found")
     args, _ = ap.parse_known_args(["detect" if a == "--detect" else a for a in sys.argv[1:]])
     if args.cmd == "setup":
-        return cmd_setup(args.dry_run)
+        return cmd_setup(args.dry_run, args.quiet)
     {"detect": cmd_detect, "uninstall": cmd_uninstall,
      "doctor": cmd_doctor}.get(args.cmd, main)()
 

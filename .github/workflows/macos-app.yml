@@ -1,0 +1,64 @@
+name: macos-app
+
+# Builds the double-click Mac installer (Agent Presence.app inside a .dmg),
+# smoke-tests it, and attaches it to the GitHub release.
+
+on:
+  push:
+    paths: ["macos/**", "ai_presence.py", "pyproject.toml", ".github/workflows/macos-app.yml"]
+  pull_request:
+    paths: ["macos/**", "ai_presence.py", "pyproject.toml", ".github/workflows/macos-app.yml"]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach the .dmg to (e.g. v0.8.1). Blank = build only."
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build app and dmg
+        env:
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: bash macos/build_app.sh dist
+
+      - name: Smoke test the installer script
+        run: |
+          set -x
+          CORE="dist/Agent Presence.app/Contents/Resources/install_core.sh"
+          test "$("$CORE" status)" = "not-installed"
+          "$CORE" install --skip-service
+          ~/.local/bin/agent-presence --help
+          ~/.local/bin/agent-presence doctor
+          ~/.local/bin/agent-presence setup --dry-run
+          "$CORE" python-path
+          "$CORE" uninstall
+          test ! -e ~/.local/bin/agent-presence
+          test ! -d "$HOME/Library/Application Support/Agent Presence"
+
+      - name: Install log
+        if: always()
+        run: cat ~/Library/Logs/agent-presence-install.log || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AgentPresence-macOS
+          path: dist/AgentPresence-macOS.dmg
+
+      - name: Attach to release
+        if: github.event_name == 'release' || inputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release upload "$TAG" dist/AgentPresence-macOS.dmg --clobber
