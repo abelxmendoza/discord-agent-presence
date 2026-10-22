@@ -9,7 +9,8 @@ Done so far: `claude` (all six moods), `chatgpt` (cooking / waiting / idle), `he
 **Big picture** (app × mood): `<app>_cooking`, `_waiting`, `_idle`, plus optional
 `_success` (tests/build just passed), `_failed` (failing tests/build or red CI) and
 `_crew` (3+ busy agents). A missing optional mood falls back to cooking/waiting,
-then `<app>.png`, then `logo.png`. Apps: `claude` `chatgpt` `grok` `gemini` `muse` `cursor` `vscode`.
+then `<app>.png`, then `logo.png`. Apps: `claude` `chatgpt` `grok` `gemini` `muse` `copilot` `opencode` `aider`
+`cursor` `windsurf` `kiro` `vscode`.
 
 **Small badge** (follows the rotating line):
 - agent count: `agents_1` … `agents_9` (9 = 9+)

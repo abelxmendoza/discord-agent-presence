@@ -44,6 +44,11 @@ Symbols:
 - vscode  : an abstract folded ribbon forming a "<" chevron, azure (#0EA5E9)
 - gemini  : a four-pointed sparkle star, blue-to-violet gradient (#4285F4 → #A142F4)
 - muse    : an abstract infinity-loop ribbon, Meta blue (#0866FF) with cyan edges
+- copilot : a friendly pilot-goggles visor glyph, white with purple glow (#A371F7)
+- opencode: an open angle-bracket "{ }" portal, warm peach (#FAB283)
+- aider   : two overlapping speech bubbles with a code caret, green (#14B014)
+- windsurf: a stylized wave with a sail, aqua (#58E6D9)
+- kiro    : a friendly ghost-like rounded glyph, purple (#9046FF)
 
 Moods (same symbol, same position, so switching between them looks like an
 animation frame):
@@ -54,7 +59,8 @@ animation frame):
 - <name>_idle    : desaturated grey, dim, almost no glow, sleepy
 
 Files: <app>_cooking, <app>_waiting, <app>_idle for each app:
-claude, chatgpt, grok, gemini, muse, cursor, vscode.
+claude, chatgpt, grok, gemini, muse, copilot, opencode, aider, cursor,
+windsurf, kiro, vscode.
 Optional extra moods per app: <app>_success (celebrating, green), <app>_failed
 (frustrated, red) and <app>_crew (three mascots at a command center).
 ```

@@ -31,7 +31,8 @@ DEFAULT_CONFIG = {
     # "Playing"). Blank = use the shared apps that ship with this tool.
     # Set an app to "off" to never show its card.
     "client_ids": {"claude": "", "chatgpt": "", "grok": "", "gemini": "", "muse": "",
-                   "cursor": "", "vscode": ""},
+                   "copilot": "", "opencode": "", "aider": "",
+                   "cursor": "", "windsurf": "", "kiro": "", "vscode": ""},
     "poll_seconds": 5,
     # How often the second line moves on to the next item.
     "rotate_seconds": 20,
@@ -71,27 +72,42 @@ SHARED_CLIENT_IDS = {
     "grok": "",
     "gemini": "",
     "muse": "",
+    "copilot": "",
+    "opencode": "",
+    "aider": "",
     "cursor": "",
+    "windsurf": "",
+    "kiro": "",
     "vscode": "",
 }
 
-TOOLS = ["claude", "chatgpt", "grok", "gemini", "muse", "cursor", "vscode"]
+TOOLS = ["claude", "chatgpt", "grok", "gemini", "muse", "copilot", "opencode", "aider",
+         "cursor", "windsurf", "kiro", "vscode"]
+EDITORS = {"cursor", "windsurf", "kiro", "vscode"}
 TOOL_NAMES = {"claude": "Claude", "chatgpt": "ChatGPT · Codex", "grok": "Grok Build",
-              "gemini": "Gemini", "muse": "Muse Code",
+              "gemini": "Gemini", "muse": "Muse Code", "copilot": "GitHub Copilot",
+              "opencode": "OpenCode", "aider": "Aider", "windsurf": "Windsurf", "kiro": "Kiro",
               "cursor": "Cursor", "vscode": "VS Code"}
 # Main app process names (/proc/<pid>/comm) -> tool
 APP_PROCS = {"claude-desktop": "claude", "ChatGPT": "chatgpt", "grok-bot": "grok",
+             "windsurf": "windsurf", "kiro": "kiro", "Kiro": "kiro", "Windsurf": "windsurf",
              "cursor": "cursor", "code": "vscode"}
 # CLI agent process names -> tool
-CLI_AGENTS = {"claude": "claude", "codex": "chatgpt", "grok": "grok", "muse": "muse"}
+CLI_AGENTS = {"claude": "claude", "codex": "chatgpt", "grok": "grok", "muse": "muse",
+              "opencode": "opencode", ".opencode": "opencode", "aider": "aider"}
 # CLI agents with no session log we can read: a running process is the agent.
-PROC_AGENTS = {"grok": "grok", "muse": "muse"}
+PROC_AGENTS = {"grok", "muse", "gemini", "copilot", "opencode", "aider"}
 # Agents that run under a JS runtime, so /proc comm is just "node": match the
 # command line instead.
-CMDLINE_AGENTS = [(re.compile(r"(?:^|/)gemini(?:\.js)?(?:\x00|$)|@google/gemini-cli"), "gemini")]
-JS_RUNTIMES = {"node", "bun", "deno"}
+CMDLINE_AGENTS = [(re.compile(r"(?:^|/)gemini(?:\.js)?(?:\x00|$)|@google/gemini-cli"), "gemini"),
+                  (re.compile(r"(?:^|/)copilot(?:\.js)?(?:\x00|$)|@github/copilot"), "copilot"),
+                  (re.compile(r"(?:^|/)opencode(?:\.js)?(?:\x00|$)|opencode-ai"), "opencode"),
+                  # aider is Python; usually comm is "aider", but `python -m aider` isn't
+                  (re.compile(r"(?:^|/)aider(?:\x00|$)|\x00-m\x00aider(?:\x00|$)"), "aider")]
+JS_RUNTIMES = {"node", "bun", "deno", "python3", "python"}
 # WM_CLASS (lowercased, snap suffix stripped) -> tool
 WINDOW_APPS = {"com.anthropic.claude": "claude", "chatgpt": "chatgpt", "grok-bot": "grok",
+               "windsurf": "windsurf", "kiro": "kiro",
                "cursor": "cursor", "code": "vscode"}
 # Claude Code transcript "entrypoint" -> tool that hosts the agent
 CLAUDE_ENTRYPOINTS = {"claude-vscode": "vscode", "claude-cursor": "cursor"}
@@ -523,6 +539,27 @@ def cpu_busy(pid):
     return rate > 0.02  # >2% of a core
 
 
+def activity_mtime(tool, cwd):
+    """Newest write to a file this CLI updates while it works (0 if none)."""
+    paths = []
+    if tool == "aider" and cwd:
+        root = resolve_project(cwd)[1] or cwd
+        paths = [Path(root) / ".aider.chat.history.md", Path(cwd) / ".aider.chat.history.md"]
+    elif tool == "copilot":
+        base = Path(os.environ.get("COPILOT_HOME", HOME / ".copilot"))
+        paths = list(base.glob("session-state/*/events.jsonl"))
+    elif tool == "opencode":
+        base = HOME / ".local/share/opencode"
+        paths = [p for p in base.glob("*.db*")] + [base / "storage"]
+    best = 0.0
+    for p in paths:
+        try:
+            best = max(best, p.stat().st_mtime)
+        except OSError:
+            pass
+    return best
+
+
 def gemini_agent(f, mtime, cwd_by_hash, cfg):
     """Gemini CLI session: ~/.gemini/tmp/<sha256(project root)>/chats/*.json."""
     try:
@@ -751,7 +788,7 @@ def snapshot(cfg):
     logged = {(a["tool"], a["cwd"]) for a in agents}
     for pid, (comm, ppid, start) in procs.items():
         tool = agent_tool_for(pid, comm)
-        if tool not in ("grok", "muse", "gemini"):
+        if tool not in PROC_AGENTS:
             continue
         if procs.get(ppid, ("",))[0] == comm:
             continue  # a worker of an agent we already counted
@@ -760,7 +797,9 @@ def snapshot(cfg):
         state[tool]["running_since"] = min(rs, start) if rs else start
         if (tool, cwd) in logged or (tool == "gemini" and any(a["tool"] == "gemini" for a in agents)):
             continue
-        busy = cpu_busy(pid)
+        # Working if it wrote its session/history file in the last 20 s, or is
+        # using CPU; otherwise it's sitting at its prompt waiting for you.
+        busy = now - activity_mtime(tool, cwd) < 20 or cpu_busy(pid)
         agents.append({"tool": tool, "mtime": now, "model": None, "cwd": cwd, "branch": None,
                        "status": "busy" if busy else "waiting",
                        "action": "⚡ working" if busy else "⏳ waiting for me", "outcome": None})
@@ -771,7 +810,7 @@ def snapshot(cfg):
 
     for w in all_windows():
         tool = window_tool(w)
-        if tool in ("cursor", "vscode"):
+        if tool in EDITORS:
             name = editor_project(w["title"])
             add_project(tool, name, root_for_name(name) if name else None)
 
@@ -786,7 +825,7 @@ def snapshot(cfg):
                 tool = max(hits)[1]
         if tool:
             state[tool]["focused"] = True
-            if tool in ("cursor", "vscode"):
+            if tool in EDITORS:
                 name = editor_project(win["title"])
                 add_project(tool, name, root_for_name(name) if name else None, 100)
 
@@ -1145,7 +1184,9 @@ VERBS = {PLAYING: "Playing", WATCHING: "Watching", COMPETING: "Competing in"}
 SERVICE = "ai-presence"
 UNIT_PATH = HOME / f".config/systemd/user/{SERVICE}.service"
 APP_BINARIES = {"claude": ["claude-desktop", "claude"], "chatgpt": ["chatgpt", "codex"],
-                "gemini": ["gemini"], "muse": ["muse"],
+                "gemini": ["gemini"], "muse": ["muse"], "copilot": ["copilot"],
+                "opencode": ["opencode"], "aider": ["aider"], "windsurf": ["windsurf"],
+                "kiro": ["kiro"],
                 "grok": ["grok", "grok-bot"], "cursor": ["cursor"], "vscode": ["code"]}
 
 
