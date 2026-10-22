@@ -54,15 +54,15 @@ jobs:
         if: always()
         run: cat ~/Library/Logs/agent-presence-install.log || true
 
-      - name: Report failure as an annotation
-        if: failure()
+      - name: Publish failure log to the ci-debug branch
+        if: failure() && github.event_name == 'push'
         run: |
-          {
-            tail -n 40 build.log 2>/dev/null
-            echo "---- install log"
-            tail -n 40 ~/Library/Logs/agent-presence-install.log 2>/dev/null
-          } > tail.txt || true
-          echo "::error title=macos-app failed::$(sed 's/%/%25/g' tail.txt | awk 'BEGIN{ORS="%0A"} {print}')"
+          mkdir -p /tmp/dbg && cd /tmp/dbg
+          cp "$GITHUB_WORKSPACE/build.log" . 2>/dev/null || true
+          cp ~/Library/Logs/agent-presence-install.log . 2>/dev/null || true
+          git init -q && git checkout -q -b ci-debug
+          git add -A && git -c user.name=ci -c user.email=ci@example.com commit -q -m "macos-app failure log $GITHUB_SHA"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/$GITHUB_REPOSITORY" ci-debug
 
       - uses: actions/upload-artifact@v4
         with:
