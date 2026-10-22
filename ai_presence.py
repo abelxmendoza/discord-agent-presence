@@ -26,9 +26,10 @@ HOME = Path.home()
 CONFIG_PATH = HOME / ".config/ai-presence/config.json"
 STATE_DIR = HOME / ".local/state/ai-presence"
 DEFAULT_CONFIG = {
-    # Application ID per app, from discord.com/developers/applications.
-    # Name each Discord application what you want after "Playing".
-    # Apps left blank are skipped.
+    # Optional: your own Application ID per app, from
+    # discord.com/developers/applications (its name is what shows after
+    # "Playing"). Blank = use the shared apps that ship with this tool.
+    # Set an app to "off" to never show its card.
     "client_ids": {"claude": "", "chatgpt": "", "grok": "", "cursor": "", "vscode": ""},
     "poll_seconds": 5,
     # How often the second line moves on to the next item.
@@ -48,10 +49,21 @@ DEFAULT_CONFIG = {
     "show_ci": True,          # public GitHub repos only
     "github_button": True,    # public GitHub repos only
     "mood_verbs": True,       # Watching / Competing in, instead of always Playing
-    # Images: "assets" = keys uploaded to each Discord app's Art Assets,
-    # "url" = PNGs hosted at image_base_url, "none" = no images.
-    "images": "none",
-    "image_base_url": "",
+    # Images: "url" = PNGs at image_base_url (missing ones are skipped),
+    # "assets" = same names uploaded to each Discord app's Art Assets,
+    # "none" = no images.
+    "images": "url",
+    "image_base_url": "https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/images",
+}
+
+# Shared Discord applications, so the cards work with zero setup.
+# Application IDs are public identifiers, not secrets.
+SHARED_CLIENT_IDS = {
+    "claude": "1562634034390114445",
+    "chatgpt": "",
+    "grok": "",
+    "cursor": "",
+    "vscode": "",
 }
 
 TOOLS = ["claude", "chatgpt", "grok", "cursor", "vscode"]
@@ -82,6 +94,17 @@ def log(*a):
     print(time.strftime("%H:%M:%S"), *a, flush=True)
 
 
+def client_ids(cfg):
+    """App -> Application ID: user's own, else the shared one; "off" disables."""
+    ids = {}
+    for tool in TOOLS:
+        mine = (cfg["client_ids"].get(tool) or "").strip()
+        cid = None if mine.lower() == "off" else (mine or SHARED_CLIENT_IDS.get(tool))
+        if cid:
+            ids[tool] = cid
+    return ids
+
+
 def load_config():
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))
     if CONFIG_PATH.exists():
@@ -89,6 +112,7 @@ def load_config():
         for old in ("client_id", "linger_seconds", "include_vscode", "use_images"):
             user.pop(old, None)  # from earlier versions
         cfg.update(user)
+        cfg["client_ids"] = {**DEFAULT_CONFIG["client_ids"], **user.get("client_ids", {})}
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
     return cfg
@@ -598,19 +622,61 @@ def clip(s, n=128):
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
-def image(cfg, key):
-    if cfg["images"] == "url" and cfg["image_base_url"]:
-        return f"{cfg['image_base_url'].rstrip('/')}/{key}.png"
-    return key
+# Line emoji -> small badge image
+ACTION_BADGES = {"✍": "act_edit", "📖": "act_read", "🔍": "act_search", "🌐": "act_web",
+                 "🤖": "act_subagent", "🖥": "act_browser", "🧪": "act_test", "🔨": "act_build",
+                 "📦": "act_commit", "🚀": "act_push", "🛸": "act_sim", "⚙": "act_shell",
+                 "⚡": "act_working", "💭": "act_thinking", "⏳": "act_waiting"}
+CI_BADGES = {"✅": "ci_green", "❌": "ci_fail", "🟡": "ci_running"}
+
+
+def url_exists(url):
+    def fetch():
+        req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "ai-presence"})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status == 200
+        except Exception:
+            return False
+    return cached(CACHE, ("img", url), 6 * 3600, fetch)
+
+
+def image(cfg, *keys):
+    """First of `keys` that exists, as a Discord image (URL or asset key)."""
+    if cfg["images"] == "assets":
+        return keys[0]
+    if cfg["images"] != "url" or not cfg["image_base_url"]:
+        return None
+    for key in keys:
+        if key:
+            url = f"{cfg['image_base_url'].rstrip('/')}/{key}.png"
+            if url_exists(url):
+                return url
+    return None
+
+
+def mood(s):
+    if any(a["status"] == "busy" for a in s["agents"]):
+        return "cooking"
+    if s["agents"]:
+        return "waiting"
+    return "cooking" if s["focused"] else "idle"
 
 
 def card_lines(cfg, tool, s, streak):
-    """Every line this card can rotate through, as (text, party) pairs."""
+    """Every line this card can rotate through, as dicts of
+    text / party ("(2 of 3)") / badge (small image) / hover (its tooltip)."""
     hidden = set(cfg["hide_projects"])
     agents = s["agents"]
     busy = [a for a in agents if a["status"] == "busy"]
     waiting = [a for a in agents if a["status"] == "waiting"]
+    count_badge = f"agents_{min(len(agents), 9)}" if agents else None
+    count_hover = plural(len(agents), "agent") + " running" if agents else None
     lines = []
+
+    def add(text, badge=None, hover=None, party=None):
+        lines.append({"text": clip(text), "badge": badge, "hover": hover or text,
+                      "party": party})
 
     # 1. Agent headline, with Discord's "(2 of 3)" party counter.
     if agents:
@@ -620,16 +686,17 @@ def card_lines(cfg, tool, s, streak):
             text = f"⚡ {plural(len(busy), 'agent')} cooking"
         else:
             text = f"⏳ {plural(len(waiting), 'agent')} waiting for me"
-        lines.append((text, [len(busy), len(agents)] if len(agents) > 1 else None))
+        add(text, count_badge, count_hover, [len(busy), len(agents)] if len(agents) > 1 else None)
     elif s["focused"]:
-        lines.append(("● hands on keyboard", None))
+        add("● hands on keyboard")
     else:
-        lines.append(("○ open in the background", None))
+        add("○ open in the background")
 
     # 2. What each busy agent is doing right now (newest first, up to 3).
     for a in sorted(busy, key=lambda a: -a["mtime"])[:3]:
         where = a["project"] if a["project"] and a["project"] not in hidden else None
-        lines.append((f"{a['action']} · {where}" if where and cfg["show_project"] else a["action"], None))
+        text = f"{a['action']} · {where}" if where and cfg["show_project"] else a["action"]
+        add(text, ACTION_BADGES.get(a["action"].split()[0]), a["action"])
 
     # 3. Git for the top project, then streak / commits, then model + CI.
     top = next((p for p in s["projects"] if p not in hidden and s["roots"].get(p)), None)
@@ -637,7 +704,7 @@ def card_lines(cfg, tool, s, streak):
     git = git_stats(root) if root else None
     if cfg["show_git"] and git and git["branch"]:
         diff = f" · +{git['added']} −{git['removed']}" if git["added"] or git["removed"] else " · clean"
-        lines.append((f"🌿 {git['branch']}{diff}", None))
+        add(f"🌿 {git['branch']}{diff}", "git", f"{top} on {git['branch']}")
 
     bits = []
     if cfg["show_streak"] and streak >= 2:
@@ -646,20 +713,28 @@ def card_lines(cfg, tool, s, streak):
     if commits:
         bits.append(f"📦 {plural(commits, 'commit')} today")
     if bits:
-        lines.append((" · ".join(bits), None))
+        badge = ("streak_big" if streak >= 7 else "streak") if streak >= 2 else "act_commit"
+        add(" · ".join(bits), badge)
 
-    bits = []
-    models = [pretty_model(a["model"]) for a in agents if a["model"]]
+    bits, badge = [], None
+    models = [a["model"] for a in agents if a["model"]]
     if cfg["show_model"] and models:
-        bits.append(f"🧠 {max(set(models), key=models.count)}")
+        top_model = max(set(models), key=models.count)
+        bits.append(f"🧠 {pretty_model(top_model)}")
+        badge = "model_claude" if top_model.startswith("claude") else "model_gpt"
     slug = github_slug(root) if root else None
     if cfg["show_ci"] and slug and git and git["branch"] and github_public(slug):
         ci = ci_status(slug, git["branch"])
         if ci:
             bits.append(ci)
+            badge = CI_BADGES.get(ci.split()[0], badge)
     if bits:
-        lines.append((" · ".join(bits), None))
-    return [(clip(t), p) for t, p in lines], top, slug
+        add(" · ".join(bits), badge)
+
+    for line in lines:  # fall back to the agent count when a line has no badge
+        if not line["badge"]:
+            line["badge"], line["hover"] = count_badge, count_hover
+    return lines, top, slug
 
 
 def build_activity(cfg, tool, s, totals, streak, tick):
@@ -676,7 +751,7 @@ def build_activity(cfg, tool, s, totals, streak, tick):
         details = f"Building with {TOOL_NAMES[tool]}"
 
     lines, top, slug = card_lines(cfg, tool, s, streak)
-    text, party = lines[tick % len(lines)]
+    line = lines[tick % len(lines)]
 
     kind = PLAYING
     if cfg["mood_verbs"]:
@@ -685,26 +760,27 @@ def build_activity(cfg, tool, s, totals, streak, tick):
         elif busy and not s["focused"]:
             kind = WATCHING           # "Watching Claude" while it cooks
 
-    act = {"type": kind, "details": details, "state": text,
+    act = {"type": kind, "details": details, "state": line["text"],
            "timestamps": {"start": int(s["running_since"])}}
-    if party:
-        act["party"] = {"id": f"ai-presence-{tool}", "size": party}
+    if line["party"]:
+        act["party"] = {"id": f"ai-presence-{tool}", "size": line["party"]}
 
     if cfg["github_button"] and slug and top and github_public(slug):
         label = f"⭐ {top} on GitHub"
         act["buttons"] = [{"label": label if len(label) <= 32 else "⭐ View on GitHub",
                            "url": f"https://github.com/{slug}"}]
 
-    if cfg["images"] in ("assets", "url"):
+    # Big picture: the app in its current mood. Small badge: follows the line.
+    m = mood(s)
+    large = image(cfg, f"{tool}_{m}", tool, "logo")
+    if large:
         across = (f"{plural(totals['agents'], 'agent')} across {plural(totals['tools'], 'app')}"
-                  if totals["tools"] > 1 else TOOL_NAMES[tool])
-        act["assets"] = {"large_image": image(cfg, tool if cfg["images"] == "url" else "logo"),
-                         "large_text": across}
-        if agents:
-            models = [pretty_model(a["model"]) for a in agents if a["model"]]
-            act["assets"]["small_image"] = image(cfg, f"agents_{min(len(agents), 9)}")
-            act["assets"]["small_text"] = (f"{plural(len(agents), 'agent')}"
-                                           + (f" · {models[0]}" if models else ""))
+                  if totals["tools"] > 1 else f"{TOOL_NAMES[tool]} · {m}")
+        act["assets"] = {"large_image": large, "large_text": clip(across)}
+        small = image(cfg, line["badge"], f"agents_{min(len(agents), 9)}" if agents else None)
+        if small:
+            act["assets"]["small_image"] = small
+            act["assets"]["small_text"] = clip(line["hover"] or "")
     return act
 
 
@@ -808,10 +884,9 @@ def activities(cfg, tick):
 
 def main():
     cfg = load_config()
-    ids = {t: cid for t, cid in cfg["client_ids"].items() if cid}
+    ids = client_ids(cfg)
     if not ids:
-        sys.exit(f"Add at least one Application ID under client_ids in {CONFIG_PATH} "
-                 "(see README.md).")
+        sys.exit(f"No Discord applications configured; see client_ids in {CONFIG_PATH}.")
     log("cards enabled for:", ", ".join(TOOL_NAMES[t] for t in ids))
     conns = {t: DiscordIPC(cid) for t, cid in ids.items()}
     while True:
@@ -834,22 +909,104 @@ def main():
         time.sleep(cfg["poll_seconds"])
 
 
+# ----------------------------------------------------------------- CLI ----
+
 VERBS = {PLAYING: "Playing", WATCHING: "Watching", COMPETING: "Competing in"}
+SERVICE = "ai-presence"
+UNIT_PATH = HOME / f".config/systemd/user/{SERVICE}.service"
+APP_BINARIES = {"claude": ["claude-desktop", "claude"], "chatgpt": ["chatgpt", "codex"],
+                "grok": ["grok", "grok-bot"], "cursor": ["cursor"], "vscode": ["code"]}
+
+
+def cmd_detect():
+    cfg = load_config()
+    live = snapshot(cfg)
+    if not live:
+        print("No supported apps open and no agents running right now.")
+    roots = {r for s in live.values() for r in s["roots"].values()}
+    streak = update_streak(bool(live), roots)
+    totals = {"agents": sum(len(s["agents"]) for s in live.values()), "tools": len(live)}
+    for tool, s in live.items():
+        act = build_activity(cfg, tool, s, totals, streak, 0)
+        print(f"\n{VERBS[act['type']]} {TOOL_NAMES[tool]}")
+        print(f"  {act['details']}")
+        print(f"  [big: {tool}_{mood(s)}]")
+        for ln in card_lines(cfg, tool, s, streak)[0]:
+            party = ln["party"]
+            print(f"  ↻ {ln['text']}" + (f"  ({party[0]} of {party[1]})" if party else "")
+                  + f"   [badge: {ln['badge']}]")
+        for b in act.get("buttons", []):
+            print(f"  [ {b['label']} ] -> {b['url']}")
+
+
+def cmd_doctor():
+    import shutil
+    cfg = load_config()
+    ok = lambda b: "✓" if b else "✗"
+    print(f"{ok(os.environ.get('DISPLAY'))} X11 display: {os.environ.get('DISPLAY') or 'not set'}"
+          f" (session: {os.environ.get('XDG_SESSION_TYPE', '?')})")
+    print(f"{ok(shutil.which('xprop'))} xprop installed")
+    ipc = next((p for p in DiscordIPC('')._paths() if os.path.exists(p)), None)
+    print(f"{ok(ipc)} Discord running: {ipc or 'no IPC socket found'}")
+    ids = client_ids(cfg)
+    for tool in TOOLS:
+        found = next((b for b in APP_BINARIES[tool] if shutil.which(b)), None)
+        card = "card on" if tool in ids else "no Application ID (card off)"
+        print(f"{ok(found)} {TOOL_NAMES[tool]:16} {('found ' + found) if found else 'not found':22} {card}")
+    print(f"{ok(UNIT_PATH.exists())} service installed: {UNIT_PATH}")
+    print(f"  config: {CONFIG_PATH}")
+
+
+def cmd_setup():
+    import shutil
+    if not shutil.which("systemctl"):
+        sys.exit("systemd not found; run `agent-presence run` from your session's autostart instead.")
+    load_config()  # writes a default config if missing
+    UNIT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    UNIT_PATH.write_text(f"""[Unit]
+Description=Discord Rich Presence for AI coding tools
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart={sys.executable} {Path(__file__).resolve()} run
+Restart=always
+RestartSec=20
+Environment=DISPLAY={os.environ.get('DISPLAY', ':0')}
+
+[Install]
+WantedBy=graphical-session.target
+""")
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+    subprocess.run(["systemctl", "--user", "enable", "--now", SERVICE], check=True)
+    subprocess.run(["systemctl", "--user", "restart", SERVICE], check=True)
+    print("Installed and started. It will start on every login.\n")
+    cmd_doctor()
+    print("\nPreview your cards:  agent-presence detect"
+          "\nLive log:            journalctl --user -u ai-presence -f")
+
+
+def cmd_uninstall():
+    subprocess.run(["systemctl", "--user", "disable", "--now", SERVICE])
+    UNIT_PATH.unlink(missing_ok=True)
+    subprocess.run(["systemctl", "--user", "daemon-reload"])
+    print(f"Service removed. Config left at {CONFIG_PATH}.")
+
+
+def cli():
+    import argparse
+    ap = argparse.ArgumentParser(prog="agent-presence",
+                                 description="Discord Rich Presence for AI coding tools.")
+    sub = ap.add_subparsers(dest="cmd")
+    sub.add_parser("run", help="run in the foreground (what the service runs)")
+    sub.add_parser("detect", help="preview every card and rotating line")
+    sub.add_parser("setup", help="install and start the login service")
+    sub.add_parser("uninstall", help="stop and remove the login service")
+    sub.add_parser("doctor", help="check Discord, X11 and which apps are found")
+    args, _ = ap.parse_known_args(["detect" if a == "--detect" else a for a in sys.argv[1:]])
+    {"detect": cmd_detect, "setup": cmd_setup, "uninstall": cmd_uninstall,
+     "doctor": cmd_doctor}.get(args.cmd, main)()
+
 
 if __name__ == "__main__":
-    if "--detect" in sys.argv:
-        cfg = load_config()
-        live = snapshot(cfg)
-        roots = {r for s in live.values() for r in s["roots"].values()}
-        streak = update_streak(bool(live), roots)
-        totals = {"agents": sum(len(s["agents"]) for s in live.values()), "tools": len(live)}
-        for tool, s in live.items():
-            act = build_activity(cfg, tool, s, totals, streak, 0)
-            print(f"\n{VERBS[act['type']]} {TOOL_NAMES[tool]}")
-            print(f"  {act['details']}")
-            for text, party in card_lines(cfg, tool, s, streak)[0]:
-                print(f"  ↻ {text}" + (f"  ({party[0]} of {party[1]})" if party else ""))
-            for b in act.get("buttons", []):
-                print(f"  [ {b['label']} ] -> {b['url']}")
-        sys.exit(0)
-    main()
+    cli()

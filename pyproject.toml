@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "discord-agent-presence"
+version = "0.2.0"
+description = "Discord Rich Presence for AI coding tools: Claude, ChatGPT/Codex, Grok, Cursor and VS Code"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Abel Mendoza" }]
+requires-python = ">=3.8"
+dependencies = []
+keywords = ["discord", "rich-presence", "claude", "codex", "cursor", "vscode", "ai-agents"]
+classifiers = ["Operating System :: POSIX :: Linux", "Environment :: X11 Applications"]
+
+[project.urls]
+Homepage = "https://github.com/abelxmendoza/discord-agent-presence"
+
+[project.scripts]
+agent-presence = "ai_presence:cli"
+
+[tool.setuptools]
+py-modules = ["ai_presence"]

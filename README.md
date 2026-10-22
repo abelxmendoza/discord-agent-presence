@@ -43,26 +43,50 @@ Linux / X11 only. Pure Python 3, no dependencies (uses `xprop`).
 ## Install
 
 ```bash
-git clone git@github.com:abelxmendoza/discord-agent-presence.git
-cd discord-agent-presence
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/install.sh | bash
 ```
 
-Then, for each app you want a card for:
-
-1. Go to <https://discord.com/developers/applications> and click **New
-   Application**. Its name is what shows after "Playing", e.g. `Claude`,
-   `ChatGPT`, `Grok Build`, `Cursor`, `Visual Studio Code`.
-2. Paste its **Application ID** into `client_ids` in
-   `~/.config/ai-presence/config.json`. Apps you leave blank are skipped.
-3. `systemctl --user restart ai-presence`
-
-Useful commands:
+That's it. Cards use shared Discord applications that ship with the tool, so
+there's nothing to set up. The installer clones to
+`~/.local/share/discord-agent-presence`, adds the `agent-presence` command and
+starts a login service. Other ways to install:
 
 ```bash
-python3 ai_presence.py --detect          # preview every card and rotating line
-journalctl --user -u ai-presence -f      # live log
+pipx install git+https://github.com/abelxmendoza/discord-agent-presence && agent-presence setup
+# or from a clone:
+git clone https://github.com/abelxmendoza/discord-agent-presence && ./discord-agent-presence/install.sh
 ```
+
+| Command | |
+|---|---|
+| `agent-presence doctor` | Checks Discord, X11 and which apps are installed and have cards |
+| `agent-presence detect` | Previews every card, rotating line and image |
+| `agent-presence setup` / `uninstall` | Adds / removes the login service |
+| `agent-presence run` | Runs in the foreground |
+
+Live log: `journalctl --user -u ai-presence -f`
+
+### Use your own Discord applications (optional)
+
+To change the name after "Playing" or the app icon, create an application at
+<https://discord.com/developers/applications> and put its **Application ID**
+under `client_ids` in `~/.config/ai-presence/config.json`. Set an app to
+`"off"` to hide its card.
+
+## Images that change
+
+Each card has two image slots, and both change as you work:
+
+- **Big picture:** the app in its current mood. `claude_cooking` while agents
+  work, `claude_waiting` when they're waiting on you, `claude_idle` when the
+  app is just open.
+- **Small badge:** follows the rotating line. It shows the agent count, the
+  current action (test tube, hammer, pencil, drone…), the git branch, a streak
+  flame, the model, or CI status.
+
+Images load from [`images/`](images/) in this repo, and missing ones are
+skipped. [IMAGE_PROMPTS.md](IMAGE_PROMPTS.md) has ready-to-paste prompts that
+generate the whole set. Forks can point `image_base_url` at their own art.
 
 ## Make this card replace Discord's own VS Code card
 
@@ -70,8 +94,7 @@ Discord detects VS Code by itself and shows a plain "Playing Visual Studio Code"
 card with no project. Apps can't turn that off over Discord's local connection,
 so do it once yourself:
 
-1. Create the `vscode` application, name it **`Visual Studio Code`** (so it
-   looks the same), and add its ID to the config.
+1. Make sure the VS Code card is on (`agent-presence doctor`).
 2. In Discord, go to **User Settings → Registered Games** (called **Activity
    Settings → Registered Games** in some versions), find **Visual Studio Code**
    and remove it, or turn off its detection.
@@ -89,29 +112,18 @@ spot in the member list.
 
 | Key | Default | |
 |---|---|---|
-| `client_ids` | blank | Application ID per app: `claude`, `chatgpt`, `grok`, `cursor`, `vscode` |
 | `rotate_seconds` | 20 | How often the second line changes |
 | `agent_active_seconds` | 300 | A working agent counts if written to this recently |
 | `agent_waiting_seconds` | 1800 | How long a finished agent shows as "waiting for me" |
 | `hide_projects` | [] | Shown as "private project"; no git/CI/button for them |
 | `show_project`, `show_files`, `show_git`, `show_streak`, `show_model`, `show_ci` | true | Toggle each line |
 | `github_button`, `mood_verbs` | true | |
-| `images` | `"none"` | `"url"` (PNGs at `image_base_url`) or `"assets"` (uploaded per Discord app) |
+| `client_ids` | shared apps | Your own Application ID per app, or `"off"` |
+| `images` | `"url"` | `"url"` (PNGs at `image_base_url`), `"assets"` (uploaded per Discord app) or `"none"` |
 
 **Privacy:** everything on the card is visible to anyone who can see your
 profile. That includes project, branch and file names and commit counts.
 Commit messages and full paths are never shown.
-
-## Images
-
-See [IMAGE_PROMPTS.md](IMAGE_PROMPTS.md) for a ready-made prompt that generates a
-matching icon set (one icon per app, plus agent-count badges 1–9+). The easiest
-way to use them is to put the PNGs in `images/` in this repo and set:
-
-```json
-"images": "url",
-"image_base_url": "https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/images"
-```
 
 ## How it works
 
