@@ -52,18 +52,25 @@ DEFAULT_CONFIG = {
     "agent_active_seconds": 300,
     # ...and a finished one keeps showing as "waiting for me" this long.
     "agent_waiting_seconds": 1800,
+    # How much the Discord card shares: "minimal" (app and agent count only),
+    # "balanced" (public repos only, no file names) or "full" (everything,
+    # private repo names too). Sets the defaults for the show_* switches
+    # below; set one of those yourself and it wins over the preset.
+    "privacy": "balanced",
     # Project names listed here are shown as "private project", and get
     # no git/CI lines or GitHub button.
     "hide_projects": [],
     "show_project": True,
-    "show_files": True,       # "editing foo.py" vs just "editing"
-    "show_git": True,         # branch and +/- lines
+    "show_private_projects": False,  # name repos that aren't public on GitHub
+    "show_files": False,      # "editing foo.py" vs just "editing"
+    "show_actions": True,     # what agents are doing, and test/build results
+    "show_git": True,         # branch and +/- lines (public repos unless show_private_projects)
     "show_streak": True,
     "show_model": True,
     "show_ci": True,          # public GitHub repos only
     "github_button": True,    # public GitHub repos only
     "promo_button": True,     # 2nd button: "Get Agent Presence" -> landing page
-    "show_stats": True,       # "⏱ 3h 40m of agent time today · 💸 1.2M tokens"
+    "show_stats": True,       # "⏱ 3h 40m of agent time today · 💸 1.2M tokens", commits today
     "show_milestones": True,  # "🎉 PR #42 merged", "🏆 100th commit this month"
     "milestone_seconds": 600, # how long a milestone stays on the card
     "mood_verbs": True,       # Watching / Competing in, instead of always Playing
@@ -104,6 +111,27 @@ DEFAULT_CONFIG = {
     "images": "url",
     "image_base_url": "https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/images",
 }
+
+# What each privacy preset sets. DEFAULT_CONFIG holds the "balanced" values.
+PRIVACY_PRESETS = {
+    "minimal": {"show_project": False, "show_private_projects": False, "show_files": False,
+                "show_actions": False, "show_git": False, "show_stats": False,
+                "show_milestones": False, "show_streak": False, "show_model": False,
+                "show_ci": False, "github_button": False, "show_machine": False},
+    "balanced": {"show_project": True, "show_private_projects": False, "show_files": False,
+                 "show_actions": True, "show_git": True, "show_stats": True,
+                 "show_milestones": True, "show_streak": True, "show_model": True,
+                 "show_ci": True, "github_button": True, "show_machine": True},
+    "full": {"show_project": True, "show_private_projects": True, "show_files": True,
+             "show_actions": True, "show_git": True, "show_stats": True,
+             "show_milestones": True, "show_streak": True, "show_model": True,
+             "show_ci": True, "github_button": True, "show_machine": True},
+}
+# Before presets, every switch was written to config.json at its default, so
+# these values there mean "never chosen" and now follow the preset.
+_OLD_DEFAULTS = {"show_project": True, "show_files": True, "show_git": True, "show_stats": True,
+                 "show_milestones": True, "show_ci": True, "github_button": True,
+                 "show_machine": True, "show_streak": True, "show_model": True}
 
 # Shared Discord applications, so the cards work with zero setup.
 # Application IDs are public identifiers, not secrets.
@@ -229,17 +257,53 @@ def pick_name(cfg, s, n):
     return 1 if agents_working else 0
 
 
+def preset(cfg):
+    p = cfg.get("privacy")
+    return PRIVACY_PRESETS[p if p in PRIVACY_PRESETS else "balanced"]
+
+
+def private_dir(path):
+    """Make a folder only this user can read (it holds a token and your habits)."""
+    path.mkdir(parents=True, exist_ok=True)
+    if not IS_WIN:  # Windows profile folders are already per-user
+        try:
+            os.chmod(path, 0o700)
+        except OSError:
+            pass
+
+
+def save_config(cfg):
+    """Write config.json, owner-only. Switches left at their preset's value
+    aren't written, so changing "privacy" later still moves them."""
+    out = {k: v for k, v in cfg.items() if not (k in preset(cfg) and v == preset(cfg)[k])}
+    private_dir(CONFIG_PATH.parent)
+    tmp = CONFIG_PATH.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(out, indent=2) + "\n")
+    if not IS_WIN:
+        os.chmod(tmp, 0o600)  # in case it already existed with looser permissions
+    os.replace(tmp, CONFIG_PATH)
+
+
 def load_config():
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))
+    user = {}
     if CONFIG_PATH.exists():
         user = json.loads(CONFIG_PATH.read_text())
         for old in ("client_id", "linger_seconds", "include_vscode", "use_images"):
             user.pop(old, None)  # from earlier versions
-        cfg.update(user)
-        cfg["client_ids"] = {**DEFAULT_CONFIG["client_ids"], **user.get("client_ids", {})}
-        cfg["web"] = {**DEFAULT_CONFIG["web"], **user.get("web", {})}
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+        if "privacy" not in user:  # from before presets
+            for k, v in _OLD_DEFAULTS.items():
+                if user.get(k) == v:
+                    user.pop(k)
+    cfg["privacy"] = user.get("privacy", cfg["privacy"])
+    cfg.update(preset(cfg))
+    cfg.update(user)
+    cfg["client_ids"] = {**DEFAULT_CONFIG["client_ids"], **user.get("client_ids", {})}
+    cfg["web"] = {**DEFAULT_CONFIG["web"], **user.get("web", {})}
+    save_config(cfg)
+    private_dir(STATE_DIR)
     return cfg
 
 
@@ -547,10 +611,19 @@ def pretty_model(m):
     return s.replace("GPT ", "GPT-")
 
 
+# File names never shown, even with show_files on.
+SENSITIVE_FILE = re.compile(
+    r"^\.env|^\.npmrc$|^\.netrc$|^\.pypirc$|^id_(rsa|dsa|ecdsa|ed25519)|secret|passw|credential|"
+    r"token|private|api[_-]?key|(^|[._-])keys?([._-]|$)|\.(pem|key|p12|pfx|kdbx|keystore|jks|ovpn)$",
+    re.I)
+
+
 def action_for(tool, args, show_files):
     """Turn an agent's latest tool call into a short, friendly line."""
     args = args if isinstance(args, dict) else {}
     fname = Path(str(args.get("file_path") or args.get("notebook_path") or "")).name
+    if SENSITIVE_FILE.search(fname):
+        fname = ""
     f = f" {fname}" if show_files and fname else ""
     t = tool.lower()
     cmd = args.get("command") or args.get("cmd") or ""
@@ -1323,10 +1396,30 @@ MOOD_FALLBACK = {"failed": "waiting", "success": "cooking", "crew": "cooking",
                  "push": "success", "sim": "cooking"}
 
 
+def shown_action(cfg, action):
+    """An agent's action as this card may show it. Peers' actions arrive
+    already rendered with their own settings, so file names are checked again."""
+    m = re.search(r"\s+(\S*\.[A-Za-z0-9]{1,8})$", action)
+    if m and (not cfg["show_files"] or SENSITIVE_FILE.search(m.group(1))):
+        return strip_file(action)
+    return action
+
+
+def masked_projects(cfg, s):
+    """Projects the Discord card calls "private project": the hidden ones,
+    and unless show_private_projects, any that aren't public on GitHub."""
+    hidden = set(cfg["hide_projects"])
+    if cfg.get("show_private_projects"):
+        return hidden
+    return hidden | {p for p in s["projects"] if not is_public_project(
+        s, p, next((a for a in s["agents"] if a.get("project") == p), None))}
+
+
 def card_lines(cfg, tool, s, streak, machines=None, switched=None):
     """Every line this card can rotate through, as dicts of
     text / party ("(2 of 3)") / badge (small image) / hover (its tooltip)."""
     hidden = set(cfg["hide_projects"])
+    masked = masked_projects(cfg, s)
     agents = s["agents"]
     busy = [a for a in agents if a["status"] == "busy"]
     waiting = [a for a in agents if a["status"] == "waiting"]
@@ -1376,13 +1469,14 @@ def card_lines(cfg, tool, s, streak, machines=None, switched=None):
             add(text, None, hover)
 
     # 2. What each busy agent is doing right now (newest first, up to 3).
-    for a in sorted(busy, key=lambda a: -a["mtime"])[:3]:
-        where = a["project"] if a["project"] and a["project"] not in hidden else None
-        text = f"{a['action']} · {where}" if where and cfg["show_project"] else a["action"]
-        add(text, ACTION_BADGES.get(a["action"].split()[0]), a["action"])
+    for a in sorted(busy, key=lambda a: -a["mtime"])[:3] if cfg["show_actions"] else []:
+        action = shown_action(cfg, a["action"])
+        where = a["project"] if a["project"] and a["project"] not in masked else None
+        text = f"{action} · {where}" if where and cfg["show_project"] else action
+        add(text, ACTION_BADGES.get(action.split()[0]), action)
 
     # 3. Result of the newest test/build run (within the last 30 minutes).
-    o = latest_outcome(s)
+    o = latest_outcome(s) if cfg["show_actions"] else None
     if o and time.time() - o["t"] < 1800:
         label = {("tests", True): "✅ tests passed", ("tests", False): "❌ tests failing",
                  ("build", True): "✅ build passed", ("build", False): "❌ build failed",
@@ -1403,7 +1497,7 @@ def card_lines(cfg, tool, s, streak, machines=None, switched=None):
             add(" · ".join(bits), "act_working")
 
     # 4. Git for the top project, then streak / commits, then model + CI.
-    top = next((p for p in s["projects"] if p not in hidden and s["roots"].get(p)), None)
+    top = next((p for p in s["projects"] if p not in masked and s["roots"].get(p)), None)
     root = s["roots"].get(top) if top else None
     git = git_stats(root) if root else None
     if cfg["show_git"] and git and git["branch"]:
@@ -1414,7 +1508,7 @@ def card_lines(cfg, tool, s, streak, machines=None, switched=None):
     if cfg["show_streak"] and streak >= 2:
         bits.append(f"🔥 {streak}-day streak")
     commits = sum(git_stats(r)["commits_today"] for p, r in s["roots"].items() if p not in hidden)
-    if commits:
+    if commits and cfg["show_stats"]:
         bits.append(f"📦 {plural(commits, 'commit')} today")
     if bits:
         badge = ("streak_big" if streak >= 7 else "streak") if streak >= 2 else "act_commit"
@@ -1444,8 +1538,9 @@ def card_lines(cfg, tool, s, streak, machines=None, switched=None):
 
 
 def build_activity(cfg, tool, s, totals, streak, tick, machines=None, switched=None):
+    masked = masked_projects(cfg, s)
     projects = list(dict.fromkeys(
-        "private project" if p in cfg["hide_projects"] else p for p in s["projects"]))
+        "private project" if p in masked else p for p in s["projects"]))
     agents = s["agents"]
     busy = [a for a in agents if a["status"] == "busy"]
 
@@ -1701,13 +1796,47 @@ def machine_status(cfg, live):
             "agents": agents[:12], "tools": tools}
 
 
+class Sealer:
+    """Encrypts and signs packets with the link key: an HMAC-SHA256 keystream
+    with a random nonce, then HMAC-SHA256 over nonce + ciphertext."""
+
+    def __init__(self, key, purpose):
+        import hashlib
+        self.enc = hashlib.sha256(f"agent-presence {purpose} enc:".encode() + key.encode()).digest()
+        self.mac = hashlib.sha256(f"agent-presence {purpose} mac:".encode() + key.encode()).digest()
+
+    def _stream(self, nonce, n):
+        import hmac
+        out = bytearray()
+        i = 0
+        while len(out) < n:
+            out += hmac.new(self.enc, nonce + i.to_bytes(8, "big"), "sha256").digest()
+            i += 1
+        return bytes(out[:n])
+
+    def seal(self, body):
+        import hmac
+        nonce = os.urandom(16)
+        ct = bytes(a ^ b for a, b in zip(body, self._stream(nonce, len(body))))
+        return hmac.new(self.mac, nonce + ct, "sha256").digest() + nonce + ct
+
+    def open(self, raw):
+        """The plaintext, or None if it wasn't sealed with this key."""
+        import hmac
+        tag, nonce, ct = raw[:32], raw[32:48], raw[48:]
+        if len(raw) < 48 or not hmac.compare_digest(
+                tag, hmac.new(self.mac, nonce + ct, "sha256").digest()):
+            return None
+        return bytes(a ^ b for a, b in zip(ct, self._stream(nonce, len(ct))))
+
+
 class Link:
     """Shares machine_status() with your other computers over UDP broadcast.
-    Packets are signed with the link key, so only your machines are trusted."""
+    Packets are encrypted and signed with the link key, so others on the
+    network can't read them and only your machines are trusted."""
 
     def __init__(self, key, port=LINK_PORT, target="<broadcast>"):
-        import hashlib
-        self.key = hashlib.sha256(key.encode()).digest()
+        self.box = Sealer(key, "link")
         self.port, self.target = port, target
         self.peers = {}  # id -> (received_at, packet)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1722,14 +1851,12 @@ class Link:
         self.sock.setblocking(False)
 
     def seal(self, packet):
-        import hmac
         body = json.dumps({**packet, "t": round(time.time(), 1)}, separators=(",", ":")).encode()
-        return hmac.new(self.key, body, "sha256").digest()[:16] + body
+        return self.box.seal(body)
 
     def open(self, data):
-        import hmac
-        mac, body = data[:16], data[16:]
-        if not hmac.compare_digest(mac, hmac.new(self.key, body, "sha256").digest()[:16]):
+        body = self.box.open(data)
+        if body is None:
             return None
         try:
             pkt = json.loads(body)
@@ -1771,48 +1898,30 @@ class Relay:
     the public repo shows nothing readable and nobody else can post to it."""
 
     def __init__(self, key, cfg):
-        import hashlib
         import threading
-        self.enc = hashlib.sha256(b"agent-presence relay enc:" + key.encode()).digest()
-        self.mac = hashlib.sha256(b"agent-presence relay mac:" + key.encode()).digest()
+        self.box = Sealer(key, "relay")
         self.cfg, self.repo = cfg, web_cfg(cfg)["repo"]
         self.peers = {}  # id -> packet
         self.seen = {}   # branch -> commit already read
         self.last_at, self.busy = 0, threading.Lock()
         self.thread_cls = threading.Thread
 
-    def _stream(self, nonce, n):
-        import hmac
-        out = bytearray()
-        i = 0
-        while len(out) < n:
-            out += hmac.new(self.enc, nonce + i.to_bytes(8, "big"), "sha256").digest()
-            i += 1
-        return bytes(out[:n])
-
     def seal(self, packet):
         import base64
-        import hmac
         body = json.dumps({**packet, "t": round(time.time(), 1)}, separators=(",", ":")).encode()
-        nonce = os.urandom(16)
-        ct = bytes(a ^ b for a, b in zip(body, self._stream(nonce, len(body))))
-        tag = hmac.new(self.mac, nonce + ct, "sha256").digest()
-        return base64.b64encode(tag + nonce + ct).decode()
+        return base64.b64encode(self.box.seal(body)).decode()
 
     def open(self, text):
         import base64
         import binascii
-        import hmac
         try:
-            raw = base64.b64decode(text.strip(), validate=True)
+            body = self.box.open(base64.b64decode(text.strip(), validate=True))
         except (binascii.Error, ValueError):
             return None
-        tag, nonce, ct = raw[:32], raw[32:48], raw[48:]
-        if len(raw) < 48 or not hmac.compare_digest(
-                tag, hmac.new(self.mac, nonce + ct, "sha256").digest()):
+        if body is None:
             return None
         try:
-            pkt = json.loads(bytes(a ^ b for a, b in zip(ct, self._stream(nonce, len(ct)))))
+            pkt = json.loads(body)
         except ValueError:
             return None
         return pkt if isinstance(pkt, dict) and pkt.get("id") else None
@@ -3098,7 +3207,7 @@ def cmd_link(key=None, off=False, print_key=False):
     if print_key:  # just the key, made if needed (for the Mac app)
         if not cfg["link_key"]:
             cfg["link_key"] = secrets.token_urlsafe(12)
-            CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+            save_config(cfg)
         print(cfg["link_key"])
         return
     if off:
@@ -3119,7 +3228,7 @@ def cmd_link(key=None, off=False, print_key=False):
               "Computers on the same network find each other. On different networks,\n"
               "run `agent-presence web setup` with the same repo on each of them too.\n\n"
               "Keep it private: anyone on your network with it could post to your card.")
-    CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+    save_config(cfg)
     print("\nRestart to apply:  agent-presence setup")
 
 
@@ -3180,7 +3289,7 @@ def cmd_web(action, repo=None, name=None, token=None, readme=False, yes=False):
     w = web_cfg(cfg)
     if action == "off":
         cfg["web"] = {**w, "enabled": False}
-        CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+        save_config(cfg)
         print("Stopped publishing. Restart to apply:  agent-presence setup\n"
               f"(The last status stays on the {w['branch']} branch until you delete it.)")
         return
@@ -3210,6 +3319,9 @@ def cmd_web(action, repo=None, name=None, token=None, readme=False, yes=False):
               "runs in the background all day.")
         if input("Use your GitHub CLI login anyway? [y/N] ").strip().lower() not in ("y", "yes"):
             return
+    elif not (os.environ.get("AGENT_PRESENCE_TOKEN") or w.get("token")) and find_gh():
+        print("Using your GitHub CLI login, which can write to all your repos. A fine-grained\n"
+              "token limited to one repo is safer: agent-presence web setup --token <token>")
     tok = github_token(cfg)
     if not tok:
         sys.exit("No GitHub login found. Either install the GitHub CLI and run `gh auth login`,\n"
@@ -3233,7 +3345,7 @@ def cmd_web(action, repo=None, name=None, token=None, readme=False, yes=False):
     st = web_status(cfg, live, machines_summary(machine_status(cfg, live), [], cfg))
     if not WebPublisher(cfg).publish(st):
         sys.exit("Couldn't publish. The token needs permission to write to " + repo + ".")
-    CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+    save_config(cfg)
     branch = cfg["web"]["branch"]
     md, html = web_snippets(repo, branch)
     print(f"Publishing to {repo} on the {branch} branch (one commit, replaced on each update;\n"
@@ -3324,6 +3436,8 @@ def cli():
     wp.add_argument("--repo", help="owner/name to publish to (default: your profile repo)")
     wp.add_argument("--name", help="name on the card (default: your GitHub login)")
     wp.add_argument("--token", help="a GitHub token, if you don't use the GitHub CLI")
+    wp.add_argument("--token-file", help="read the token from this file, then delete it "
+                    "(keeps it out of the process list)")
     wp.add_argument("--readme", action="store_true", help="also add the card to your profile README")
     wp.add_argument("-y", "--yes", action="store_true",
                     help="don't ask: use the GitHub CLI login, and edit the README if --readme")
@@ -3335,7 +3449,11 @@ def cli():
     if args.cmd == "stats":
         return cmd_stats(args.html)
     if args.cmd == "web":
-        return cmd_web(args.action, args.repo, args.name, args.token, args.readme, args.yes)
+        token = args.token
+        if args.token_file:
+            token = Path(args.token_file).read_text().strip()
+            Path(args.token_file).unlink()
+        return cmd_web(args.action, args.repo, args.name, token, args.readme, args.yes)
     {"detect": cmd_detect, "uninstall": cmd_uninstall, "machines": cmd_machines,
      "doctor": cmd_doctor}.get(args.cmd, main)()
 

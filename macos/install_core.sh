@@ -7,7 +7,8 @@
 #     (or the steps one at a time: files, runtime, service)
 #   install_core.sh uninstall
 #   install_core.sh python-path         the Python binary the login service runs
-#   install_core.sh web [--readme]      publish to your GitHub profile, then restart
+#   install_core.sh web [--readme] [--token-file <f>]
+#                                       publish to your GitHub profile, then restart
 #   install_core.sh link-key            this computer's link key (made if needed)
 #   install_core.sh link <key>          share one card with your other computers, then restart
 #
@@ -142,8 +143,17 @@ case "${1:-}" in
   # These run the app's own copy of the tool (an older installed one may not
   # know the options), and each is followed by a restart, which loads it.
   web)
+    shift
+    args=(web setup --yes)
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --readme) args+=(--readme) ;;
+        --token-file) args+=(--token-file "$2"); shift ;;
+      esac
+      shift
+    done
     step_files
-    tool web setup --yes ${2:+--readme} >/dev/null
+    tool "${args[@]}" >/dev/null
     step_service ;;
   link-key)
     step_files
@@ -156,6 +166,6 @@ case "${1:-}" in
   python-path)
     "$VENV_PY" -c 'import os, sys; print(os.path.realpath(sys._base_executable if hasattr(sys, "_base_executable") else sys.executable))' ;;
   *)
-    echo "usage: $0 status|install [--skip-service]|files|runtime|service|uninstall|python-path|web [--readme]|link-key|link <key>" >&2
+    echo "usage: $0 status|install [--skip-service]|files|runtime|service|uninstall|python-path|web [--readme] [--token-file <f>]|link-key|link <key>" >&2
     exit 2 ;;
 esac

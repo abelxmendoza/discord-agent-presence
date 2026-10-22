@@ -220,19 +220,21 @@ class Machines(unittest.TestCase):
         if host and host.lower() not in m["model"].lower().split():
             self.assertNotEqual(m["model"], host)
 
-    def test_link_signs_and_rejects(self):
+    def test_link_encrypts_signs_and_rejects(self):
         a = ap.Link("secret-key", port=0, target="127.0.0.1")
         b = ap.Link("other-key", port=0, target="127.0.0.1")
         sealed = a.seal({"id": "x", "model": "m"})
         self.assertEqual(a.open(sealed)["model"], "m")
         self.assertIsNone(b.open(sealed))                       # wrong key
-        self.assertIsNone(a.open(sealed[:-2] + b"}}"))          # tampered
+        self.assertIsNone(a.open(sealed[:-1] + bytes([sealed[-1] ^ 1])))  # tampered
+        self.assertNotIn(b'"model"', sealed)                    # unreadable on the network
         old = a.seal({"id": "x"})
-        import hmac
         body = json.dumps({"id": "x", "t": time.time() - 600}).encode()
-        stale = hmac.new(a.key, body, "sha256").digest()[:16] + body
+        stale = a.box.seal(body)
         self.assertIsNone(a.open(stale))                        # replayed
         self.assertIsNotNone(a.open(old))
+        legacy = b"\0" * 16 + json.dumps({"id": "x", "t": time.time()}).encode()
+        self.assertIsNone(a.open(legacy))                       # old plaintext packets
         a.sock.close(), b.sock.close()
 
     def test_link_round_trip(self):
@@ -472,6 +474,93 @@ class Web(unittest.TestCase):
 def date_today():
     from datetime import date
     return date.today().isoformat()
+
+
+class Privacy(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.orig = ap.CONFIG_PATH, ap.STATE_DIR
+        ap.CONFIG_PATH = Path(self.tmp.name) / "cfg" / "config.json"
+        ap.STATE_DIR = Path(self.tmp.name) / "state"
+
+    def tearDown(self):
+        ap.CONFIG_PATH, ap.STATE_DIR = self.orig
+        self.tmp.cleanup()
+
+    def card(self, cfg, *agents):
+        s = Web.live(self, *agents)["claude"]
+        s["tools"] = []
+        return ap.build_activity(cfg, "claude", s, {"agents": len(agents), "tools": 1}, 0, 0)
+
+    def test_presets_and_overrides(self):
+        cfg = ap.load_config()
+        self.assertEqual(cfg["privacy"], "balanced")
+        self.assertFalse(cfg["show_files"])
+        self.assertFalse(cfg["show_private_projects"])
+        saved = json.loads(ap.CONFIG_PATH.read_text())
+        self.assertNotIn("show_files", saved)  # follows the preset, not pinned
+        saved.update(privacy="full", show_git=False)
+        ap.CONFIG_PATH.write_text(json.dumps(saved))
+        cfg = ap.load_config()
+        self.assertTrue(cfg["show_files"] and cfg["show_private_projects"])
+        self.assertFalse(cfg["show_git"])     # your own choice beats the preset
+        saved["privacy"] = "minimal"
+        ap.CONFIG_PATH.write_text(json.dumps(saved))
+        cfg = ap.load_config()
+        self.assertFalse(cfg["show_project"] or cfg["show_files"] or cfg["show_machine"])
+
+    def test_old_configs_move_to_balanced(self):
+        ap.CONFIG_PATH.parent.mkdir(parents=True)
+        ap.CONFIG_PATH.write_text(json.dumps({"show_files": True, "show_git": False, "poll_seconds": 9}))
+        cfg = ap.load_config()
+        self.assertFalse(cfg["show_files"])   # was just the old default
+        self.assertFalse(cfg["show_git"])     # was turned off on purpose: stays off
+        self.assertEqual(cfg["poll_seconds"], 9)
+
+    @unittest.skipIf(ap.IS_WIN, "POSIX permissions")
+    def test_config_and_state_are_owner_only(self):
+        ap.CONFIG_PATH.parent.mkdir(parents=True)
+        ap.CONFIG_PATH.write_text("{}")
+        os.chmod(ap.CONFIG_PATH, 0o644)
+        cfg = ap.load_config()
+        cfg["web"]["token"] = "github_pat_x"
+        ap.save_config(cfg)
+        self.assertEqual(ap.CONFIG_PATH.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(ap.CONFIG_PATH.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(ap.STATE_DIR.stat().st_mode & 0o777, 0o700)
+
+    def test_discord_names_only_public_repos(self):
+        a = [Web.agent(self, "omega-1", public=True), Web.agent(self, "employer-api")]
+        act = self.card(ap.DEFAULT_CONFIG, *a)
+        self.assertIn("omega-1", act["details"])
+        self.assertIn("private project", act["details"])
+        self.assertNotIn("employer-api", json.dumps(act))
+        full = self.card({**ap.DEFAULT_CONFIG, **ap.PRIVACY_PRESETS["full"]}, *a)
+        self.assertIn("employer-api", full["details"])
+
+    def test_peer_actions_follow_this_cards_settings(self):
+        peer = Web.agent(self, "omega-1", public=True, action="✍ editing roadmap.md")
+        act = self.card(ap.DEFAULT_CONFIG, peer)
+        self.assertNotIn("roadmap.md", json.dumps(act, ensure_ascii=False))
+        full = {**ap.DEFAULT_CONFIG, **ap.PRIVACY_PRESETS["full"]}
+        self.assertEqual(ap.shown_action(full, "✍ editing roadmap.md"), "✍ editing roadmap.md")
+        self.assertEqual(ap.shown_action(full, "✍ editing .env.local"), "✍ editing")
+
+    def test_minimal_shows_only_the_app_and_count(self):
+        cfg = {**ap.DEFAULT_CONFIG, **ap.PRIVACY_PRESETS["minimal"]}
+        a = Web.agent(self, "omega-1", public=True)
+        a["outcome"] = {"kind": "tests", "ok": False, "t": time.time()}
+        s = Web.live(self, a)["claude"]
+        s["tools"] = []
+        lines, _, _ = ap.card_lines(cfg, "claude", s, 9)
+        self.assertEqual([l["text"] for l in lines], ["⚡ 1 agent cooking"])
+
+    def test_sensitive_file_names_never_show(self):
+        for name in (".env", ".env.local", "id_rsa", "server.pem", "secrets.yaml", "api_key.txt",
+                     "aws-credentials", "keys.json"):
+            self.assertEqual(ap.action_for("Edit", {"file_path": f"/r/{name}"}, True), "✍ editing files")
+        for name in ("keyboard.py", "monkey.js", "nav.cpp"):
+            self.assertEqual(ap.action_for("Edit", {"file_path": f"/r/{name}"}, True), f"✍ editing {name}")
 
 
 class Platform(unittest.TestCase):

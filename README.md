@@ -171,9 +171,11 @@ count toward the card, so it reads like:
 ```
 
 A machine without Discord open (a Jetson running agents over SSH, say) still
-adds its agents but never shows the card itself. Machines share a small signed
-packet over UDP port 47777 on your local network; the key stops other people's
-computers from posting to your card. The first time, macOS asks to allow Python
+adds its agents but never shows the card itself. Machines share a small
+packet over UDP port 47777 on your local network, encrypted and signed with the
+link key, so others on the network can't read it or post to your card. (Update
+all your linked computers together: older versions sent it unencrypted and
+can't read the new packets.) The first time, macOS asks to allow Python
 to find devices on your local network, and Windows asks to allow it through
 the firewall: say yes. Git lines, streaks and today's tokens come from the
 computer showing the card. Linux reads keyboard/mouse idle time with
@@ -225,9 +227,12 @@ agent-presence web setup --readme   # then: agent-presence setup  (to restart)
 ```
 
 On a Mac, the app does this too: **More… → Show it on my GitHub profile and website**.
+It asks for a fine-grained token limited to your profile repo.
 
-It uses your GitHub CLI login (`gh auth login`), or `--token` with a
-fine-grained token that has *Contents: Read and write* on the repo. It
+It uses `--token` with a fine-grained token that has *Contents: Read and
+write* on the repo (`--token-file <path>` reads it from a file and deletes the
+file), or your GitHub CLI login (`gh auth login`), which can write to all your
+repos. It
 publishes `status.json` and `status.svg` to an `agent-presence-status` branch of
 your profile repo (`you/you`, or `--repo owner/name`), as one commit that's
 replaced on every update: no history piles up, and commits off the default
@@ -303,12 +308,16 @@ Presence apps* on.
 
 | Key | Default | |
 |---|---|---|
+| `privacy` | `"balanced"` | How much the card shares. `"minimal"`: the app and how many agents, nothing else. `"balanced"`: only repos that are public on GitHub are named, no file names. `"full"`: everything, private repo names and file names too. It sets the defaults of the `show_*` keys; set one yourself and yours wins |
 | `hide_projects` | `[]` | Shown as "private project", with no git, CI or button |
+| `show_private_projects` | `false` | Name repos that aren't public on GitHub (and show their branch) |
 | `show_machine` | `true` | The computer / OS line, and which linked machines are in use |
 | `machine_name` | `""` | What to call this computer; blank = its model |
 | `web` | off | `enabled`, `repo`, `branch`, `name`, `relay`, `live`, `share`, `show_tokens`, `show_files`, `show_machines`, `every_seconds` for the README card and website widget |
 | `link_key` | `""` | Same key on each computer = one shared card (`agent-presence link`) |
-| `show_project`, `show_files`, `show_git`, `show_stats`, `show_streak`, `show_model`, `show_ci`, `show_milestones` | `true` | Turn each line on or off |
+| `show_project`, `show_git`, `show_stats`, `show_streak`, `show_model`, `show_ci`, `show_milestones` | `true` | Turn each line on or off |
+| `show_actions` | `true` | What each agent is doing, and test/build results (off in `"minimal"`) |
+| `show_files` | `false` | "editing foo.py" instead of "editing". Names like `.env`, `id_rsa`, `*.pem` or `secrets.yaml` are never shown |
 | `github_button`, `promo_button`, `mood_verbs` | `true` | |
 | `client_ids` | shared apps | Per tool: your own Application ID, a list of IDs for several names, or `"off"`. `combined` is the shared card |
 | `name_mode` | `"vibe"` | With several names: `"vibe"` (Coding / Vibe Coding) or `"rotate"` every `name_rotate_seconds` |
@@ -319,10 +328,12 @@ Presence apps* on.
 | `images`, `image_base_url` | `"url"`, this repo | `"url"`, `"assets"` (keys uploaded to your Discord app) or `"none"` |
 
 **Privacy:** everything on the card is visible to anyone who can see your
-profile: project, branch and file names, and commit counts. Commit messages and
-full paths are never shown, nor are hostnames. No code leaves your machine;
-linked computers share only card-level status with each other on your local
-network.
+profile. By default (`privacy: "balanced"`) that's the names and branches of
+repos that are public on GitHub, commit counts and agent stats; private repos
+show as "private project" and file names are off. Commit messages and full
+paths are never shown, nor are hostnames. No code leaves your machine; linked
+computers share only card-level status with each other, encrypted. The config
+file, which can hold your GitHub token, is readable only by you.
 
 ## Supported tools
 
