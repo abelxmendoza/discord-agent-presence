@@ -4,15 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "discord-agent-presence"
-version = "0.5.0"
+version = "0.6.0"
 description = "Discord Rich Presence for AI coding tools: Claude, Codex, Gemini, Copilot, Grok, Muse, OpenCode, Aider, Cursor, Windsurf, Kiro and VS Code"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Abel Mendoza" }]
 requires-python = ">=3.8"
-dependencies = []
+dependencies = ["psutil>=5.9; sys_platform != 'linux'"]
 keywords = ["discord", "rich-presence", "claude", "codex", "cursor", "vscode", "ai-agents"]
-classifiers = ["Operating System :: POSIX :: Linux", "Environment :: X11 Applications"]
+classifiers = ["Operating System :: POSIX :: Linux", "Operating System :: MacOS",
+               "Operating System :: Microsoft :: Windows"]
 
 [project.urls]
 Homepage = "https://github.com/abelxmendoza/discord-agent-presence"

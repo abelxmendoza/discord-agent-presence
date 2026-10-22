@@ -22,6 +22,15 @@ import uuid
 from datetime import date, timedelta
 from pathlib import Path
 
+try:  # required on macOS / Windows; optional on Linux (/proc is used there)
+    import psutil
+except ImportError:
+    psutil = None
+
+IS_WIN = sys.platform == "win32"
+IS_MAC = sys.platform == "darwin"
+IS_LINUX = sys.platform.startswith("linux")
+
 HOME = Path.home()
 CONFIG_PATH = HOME / ".config/ai-presence/config.json"
 STATE_DIR = HOME / ".local/state/ai-presence"
@@ -95,23 +104,34 @@ TOOL_NAMES = {"claude": "Claude", "chatgpt": "ChatGPT · Codex", "grok": "Grok B
               "gemini": "Gemini", "muse": "Muse Code", "copilot": "GitHub Copilot",
               "opencode": "OpenCode", "aider": "Aider", "windsurf": "Windsurf", "kiro": "Kiro",
               "cursor": "Cursor", "vscode": "VS Code"}
-# Main app process names (/proc/<pid>/comm) -> tool
-APP_PROCS = {"claude-desktop": "claude", "ChatGPT": "chatgpt", "grok-bot": "grok",
-             "windsurf": "windsurf", "kiro": "kiro", "Kiro": "kiro", "Windsurf": "windsurf",
-             "cursor": "cursor", "code": "vscode"}
+# Desktop app main processes -> tool. Process names are compared lowercased
+# with any ".exe" removed.
+APP_PROCS = {"claude-desktop": "claude", "chatgpt": "chatgpt", "grok-bot": "grok",
+             "windsurf": "windsurf", "kiro": "kiro", "cursor": "cursor", "code": "vscode"}
+# macOS: the app bundle a main executable lives in -> tool
+MAC_BUNDLES = {"claude.app": "claude", "chatgpt.app": "chatgpt", "codex.app": "chatgpt",
+               "cursor.app": "cursor", "visual studio code.app": "vscode",
+               "windsurf.app": "windsurf", "kiro.app": "kiro", "grok.app": "grok"}
+# macOS front-app names (System Events) -> tool
+MAC_APP_NAMES = {"claude": "claude", "chatgpt": "chatgpt", "codex": "chatgpt", "cursor": "cursor",
+                 "code": "vscode", "visual studio code": "vscode", "windsurf": "windsurf",
+                 "kiro": "kiro", "grok": "grok"}
 # CLI agent process names -> tool
 CLI_AGENTS = {"claude": "claude", "codex": "chatgpt", "grok": "grok", "muse": "muse",
-              "opencode": "opencode", ".opencode": "opencode", "aider": "aider"}
+              "opencode": "opencode", ".opencode": "opencode", "aider": "aider",
+              "gemini": "gemini", "copilot": "copilot"}
 # CLI agents with no session log we can read: a running process is the agent.
 PROC_AGENTS = {"grok", "muse", "gemini", "copilot", "opencode", "aider"}
 # Agents that run under a JS runtime, so /proc comm is just "node": match the
 # command line instead.
-CMDLINE_AGENTS = [(re.compile(r"(?:^|/)gemini(?:\.js)?(?:\x00|$)|@google/gemini-cli"), "gemini"),
-                  (re.compile(r"(?:^|/)copilot(?:\.js)?(?:\x00|$)|@github/copilot"), "copilot"),
-                  (re.compile(r"(?:^|/)opencode(?:\.js)?(?:\x00|$)|opencode-ai"), "opencode"),
-                  # aider is Python; usually comm is "aider", but `python -m aider` isn't
-                  (re.compile(r"(?:^|/)aider(?:\x00|$)|\x00-m\x00aider(?:\x00|$)"), "aider")]
-JS_RUNTIMES = {"node", "bun", "deno", "python3", "python"}
+# (Command lines are \x00-separated; paths may use / or \\.)
+CMDLINE_AGENTS = [
+    (re.compile(r"(?:^|[/\\])gemini(?:\.js|\.cmd|\.exe)?(?:\x00|$)|@google[/\\]gemini-cli"), "gemini"),
+    (re.compile(r"(?:^|[/\\])copilot(?:\.js|\.cmd|\.exe)?(?:\x00|$)|@github[/\\]copilot"), "copilot"),
+    (re.compile(r"(?:^|[/\\])opencode(?:\.js|\.cmd|\.exe)?(?:\x00|$)|opencode-ai"), "opencode"),
+    # aider is Python; usually the process is "aider", but `python -m aider` isn't
+    (re.compile(r"(?:^|[/\\])aider(?:\.exe)?(?:\x00|$)|\x00-m\x00aider(?:\x00|$)"), "aider")]
+JS_RUNTIMES = {"node", "bun", "deno", "python", "python3"}
 # WM_CLASS (lowercased, snap suffix stripped) -> tool
 WINDOW_APPS = {"com.anthropic.claude": "claude", "chatgpt": "chatgpt", "grok-bot": "grok",
                "windsurf": "windsurf", "kiro": "kiro",
@@ -119,18 +139,37 @@ WINDOW_APPS = {"com.anthropic.claude": "claude", "chatgpt": "chatgpt", "grok-bot
 # Claude Code transcript "entrypoint" -> tool that hosts the agent
 CLAUDE_ENTRYPOINTS = {"claude-vscode": "vscode", "claude-cursor": "cursor"}
 TERMINALS = {"gnome-terminal-server", "gnome-terminal", "kitty", "alacritty",
-             "konsole", "xterm", "wezterm", "tilix", "terminator", "ghostty"}
+             "konsole", "xterm", "wezterm", "tilix", "terminator", "ghostty",
+             # macOS
+             "terminal", "iterm2", "warp", "wezterm-gui", "hyper", "tabby",
+             # Windows
+             "windowsterminal", "cmd", "powershell", "pwsh", "conhost", "openconsole", "mintty"}
 # Tools that mean the agent has stopped to ask you something.
 ASKING_TOOLS = {"AskUserQuestion", "ExitPlanMode"}
 
 SEP = " ✦ "
-CLK_TCK = os.sysconf("SC_CLK_TCK")
+CLK_TCK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
 # Discord activity types
 PLAYING, WATCHING, COMPETING = 0, 3, 5
 
 
 def log(*a):
-    print(time.strftime("%H:%M:%S"), *a, flush=True)
+    line = " ".join([time.strftime("%H:%M:%S"), *map(str, a)])
+    if sys.stdout is not None:  # None under pythonw on Windows
+        try:
+            print(line, flush=True)
+            return
+        except (OSError, ValueError):
+            pass
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        f = STATE_DIR / "agent-presence.log"
+        if f.exists() and f.stat().st_size > 1_000_000:
+            f.replace(f.with_suffix(".log.1"))
+        with open(f, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass
 
 
 def client_ids(cfg):
@@ -189,9 +228,15 @@ def run(*cmd, cwd=None):
         return ""
 
 
-# ---------------------------------------------------------------- X11 ----
+# ------------------------------------------------------------- windows ----
+# Every backend returns windows as {"tool", "terminal", "pid", "title"}.
 
-def window_info(wid):
+def norm_name(name):
+    name = (name or "").lower()
+    return name[:-4] if name.endswith(".exe") else name
+
+
+def _x11_window(wid):
     info = run("xprop", "-id", wid, "WM_CLASS", "_NET_WM_PID", "_NET_WM_NAME")
     cls, pid, title = [], None, ""
     for line in info.splitlines():
@@ -206,35 +251,103 @@ def window_info(wid):
                 pass
         elif line.startswith("_NET_WM_NAME"):
             title = line.split("=", 1)[1].strip().strip('"')
-    return {"cls": cls, "pid": pid, "title": title}
+    tool = next((t for key, t in WINDOW_APPS.items() if key in cls), None)
+    return {"tool": tool, "terminal": bool(set(cls) & TERMINALS), "pid": pid, "title": title}
 
 
-def active_window():
+def _x11_windows():
     out = run("xprop", "-root", "_NET_ACTIVE_WINDOW")
     wid = out.split()[-1] if out else ""
-    if not wid.startswith("0x") or wid == "0x0":
-        return None
-    return window_info(wid)
-
-
-def all_windows():
+    active = _x11_window(wid) if wid.startswith("0x") and wid != "0x0" else None
     out = run("xprop", "-root", "_NET_CLIENT_LIST")
-    return [window_info(w.strip(",")) for w in out.split() if w.startswith("0x")]
+    return active, [_x11_window(w.strip(",")) for w in out.split() if w.startswith("0x")]
 
 
-def window_tool(win):
-    for key, tool in WINDOW_APPS.items():
-        if key in win["cls"]:
-            return tool
-    return None
+MAC_SCRIPT = """
+set out to ""
+tell application "System Events"
+  set fp to first application process whose frontmost is true
+  set out to "FRONT" & tab & (name of fp) & tab & (unix id of fp) & tab
+  try
+    set out to out & (name of front window of fp)
+  end try
+  set out to out & linefeed
+  repeat with pn in {"Cursor", "Code", "Windsurf", "Kiro"}
+    set pn to contents of pn
+    if exists process pn then
+      try
+        repeat with w in (windows of process pn)
+          set out to out & "WIN" & tab & pn & tab & (name of w) & linefeed
+        end repeat
+      end try
+    end if
+  end repeat
+end tell
+return out
+"""
+
+
+def _mac_windows():
+    """Front app via System Events. Window titles need the Accessibility
+    permission; without it we still get the front app, just no titles."""
+    active, wins = None, []
+    for line in run("osascript", "-e", MAC_SCRIPT).splitlines():
+        f = line.split("\t")
+        if f[0] == "FRONT" and len(f) >= 3:
+            name = f[1].lower()
+            active = {"tool": MAC_APP_NAMES.get(name), "terminal": name in TERMINALS,
+                      "pid": int(f[2]) if f[2].isdigit() else None,
+                      "title": f[3] if len(f) > 3 else ""}
+        elif f[0] == "WIN" and len(f) >= 3:
+            wins.append({"tool": MAC_APP_NAMES.get(f[1].lower()), "terminal": False,
+                         "pid": None, "title": f[2]})
+    return active, wins
+
+
+def _win_windows(procs):
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+
+    def info(hwnd):
+        n = user32.GetWindowTextLengthW(hwnd)
+        buf = ctypes.create_unicode_buffer(n + 1)
+        user32.GetWindowTextW(hwnd, buf, n + 1)
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        name, _, _, exe = procs.get(pid.value, ("", 0, 0, ""))
+        return {"tool": app_tool(name, exe), "terminal": name in TERMINALS,
+                "pid": pid.value, "title": buf.value}
+
+    wins = []
+    proto = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def each(hwnd, _):
+        if user32.IsWindowVisible(hwnd) and user32.GetWindowTextLengthW(hwnd):
+            wins.append(info(hwnd))
+        return True
+    user32.EnumWindows(proto(each), 0)
+    fg = user32.GetForegroundWindow()
+    return (info(fg) if fg else None), wins
+
+
+def desktop_windows(procs):
+    """(focused window or None, all windows) on this platform."""
+    try:
+        if IS_WIN:
+            return _win_windows(procs)
+        if IS_MAC:
+            return _mac_windows()
+        return _x11_windows()
+    except Exception:
+        return None, []
 
 
 # ------------------------------------------------------------ processes ----
 
-def proc_table():
-    """{pid: (comm, ppid, start_epoch)} plus a children map."""
+def _proc_table_linux():
     boot = time.time() - float(Path("/proc/uptime").read_text().split()[0])
-    procs, kids = {}, {}
+    procs = {}
     for d in Path("/proc").iterdir():
         if not d.name.isdigit():
             continue
@@ -245,8 +358,33 @@ def proc_table():
             ppid, start = int(rest[1]), boot + int(rest[19]) / CLK_TCK
         except (OSError, ValueError, IndexError):
             continue
-        pid = int(d.name)
-        procs[pid] = (comm, ppid, start)
+        try:
+            exe = os.readlink(d / "exe")
+        except OSError:
+            exe = ""
+        procs[int(d.name)] = (norm_name(comm), ppid, start, exe)
+    return procs
+
+
+def _proc_table_psutil():
+    procs = {}
+    for p in psutil.process_iter(["pid", "name", "ppid", "create_time", "exe"]):
+        i = p.info
+        procs[i["pid"]] = (norm_name(i["name"]), i["ppid"] or 0, i["create_time"] or 0.0,
+                           i["exe"] or "")
+    return procs
+
+
+def proc_table():
+    """{pid: (name, ppid, start_epoch, exe)} plus a children map."""
+    if IS_LINUX and Path("/proc/uptime").exists():
+        procs = _proc_table_linux()
+    elif psutil:
+        procs = _proc_table_psutil()
+    else:
+        procs = {}
+    kids = {}
+    for pid, (_, ppid, _, _) in procs.items():
         kids.setdefault(ppid, []).append(pid)
     return procs, kids
 
@@ -262,9 +400,23 @@ def descendants(kids, root):
 
 def proc_cwd(pid):
     try:
-        return os.readlink(f"/proc/{pid}/cwd")
-    except OSError:
+        if IS_LINUX:
+            return os.readlink(f"/proc/{pid}/cwd")
+        return psutil.Process(pid).cwd() if psutil else None
+    except Exception:
         return None
+
+
+def app_tool(name, exe):
+    """Which desktop app a process is the main process of, if any."""
+    exe = exe or ""
+    if IS_MAC:
+        m = re.search(r"/([^/]+\.app)/Contents/MacOS/[^/]+$", exe)
+        return MAC_BUNDLES.get(m.group(1).lower()) if m else None
+    if IS_WIN and name == "claude":
+        # Desktop app lives in %LOCALAPPDATA%\AnthropicClaude; the CLI elsewhere.
+        return "claude" if "anthropicclaude" in exe.lower() else None
+    return APP_PROCS.get(name)
 
 
 # ------------------------------------------------------------ projects ----
@@ -276,10 +428,12 @@ def resolve_project(cwd):
     """cwd -> (project name, repo root) or (None, None)."""
     if not cwd:
         return None, None
-    # Desktop "chat" scratch dirs aren't projects.
-    if "/.config/Claude/scratch-workspaces/" in cwd or "/Documents/Codex/" in cwd:
-        return None, None
     p = Path(cwd)
+    # Desktop "chat" scratch dirs aren't projects.
+    parts = [x.lower() for x in p.parts]
+    if "scratch-workspaces" in parts or any(
+            a == "documents" and b == "codex" for a, b in zip(parts, parts[1:])):
+        return None, None
     if p == HOME:
         return None, None
     root = p
@@ -297,7 +451,8 @@ def root_for_name(name):
     """Find a repo for a project name seen only in an editor title."""
     if name in KNOWN_ROOTS:
         return KNOWN_ROOTS[name]
-    candidates = [HOME / d / name for d in ("Desktop", "", "Documents", "projects", "code", "src")]
+    candidates = [HOME / d / name for d in ("Desktop", "", "Documents", "projects", "code", "src",
+                                            "dev", "Developer", "git", "GitHub", "source/repos")]
     candidates += list((HOME / "Desktop").glob(f"*/{name}"))
     for c in candidates:
         if (c / ".git").exists():
@@ -306,12 +461,20 @@ def root_for_name(name):
     return None
 
 
+EDITOR_TITLE_SUFFIXES = {"visual studio code", "cursor", "windsurf", "kiro", "code - oss",
+                         "vscodium", "code"}
+
+
 def editor_project(title):
-    # "file.py — project — Cursor"  /  "project — Visual Studio Code"
-    parts = [s.strip() for s in title.replace(" - ", " — ").split(" — ")]
-    if len(parts) < 2:
+    """Project from an editor window title. Linux/Windows end with the app name
+    ("file.py - project - Cursor"); macOS leaves it off ("file.py — project")."""
+    parts = [p.strip().lstrip("●").strip() for p in re.split(r"\s[—–-]\s", title or "")]
+    parts = [p for p in parts if p]
+    if parts and parts[-1].lower() in EDITOR_TITLE_SUFFIXES:
+        parts.pop()
+    if not parts:
         return None
-    name = parts[-2]
+    name = parts[-1]
     if name.startswith("[") and "]" in name:  # "[SSH: host] project"
         name = name.split("]", 1)[1].strip() or name
     return None if name.lower() in ("welcome", "untitled (workspace)", "get started") else name
@@ -524,17 +687,23 @@ def codex_agent(f, mtime, cfg):
 
 
 def proc_cmdline(pid):
+    """Command line, \\x00-separated like /proc/<pid>/cmdline."""
     try:
-        return Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf-8", "replace")
-    except OSError:
+        if IS_LINUX:
+            return Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf-8", "replace")
+        return "\x00".join(psutil.Process(pid).cmdline()) + "\x00" if psutil else ""
+    except Exception:
         return ""
 
 
-def agent_tool_for(pid, comm):
-    """Which agent CLI a process is, if any (by name, or command line for JS ones)."""
+def agent_tool_for(pid, comm, exe=""):
+    """Which agent CLI a process is, if any (by name, or command line for
+    runtimes like node / python)."""
+    if app_tool(comm, exe):
+        return None  # e.g. the Claude desktop app, not the claude CLI
     if comm in CLI_AGENTS:
         return CLI_AGENTS[comm]
-    if comm in JS_RUNTIMES:
+    if comm in JS_RUNTIMES or comm.startswith("python"):
         cmd = proc_cmdline(pid)
         for pattern, tool in CMDLINE_AGENTS:
             if pattern.search(cmd):
@@ -545,19 +714,28 @@ def agent_tool_for(pid, comm):
 CPU_SEEN = {}  # pid -> (cpu ticks, wall time) from the previous poll
 
 
+def cpu_seconds(pid):
+    try:
+        if IS_LINUX:
+            f = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+            return (int(f[11]) + int(f[12])) / CLK_TCK
+        t = psutil.Process(pid).cpu_times()
+        return t.user + t.system
+    except Exception:
+        return None
+
+
 def cpu_busy(pid):
     """True if the process used a noticeable amount of CPU since the last poll."""
-    try:
-        f = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
-        ticks = int(f[11]) + int(f[12])
-    except (OSError, ValueError, IndexError):
+    secs = cpu_seconds(pid)
+    if secs is None:
         return False
     now = time.time()
     prev = CPU_SEEN.get(pid)
-    CPU_SEEN[pid] = (ticks, now)
+    CPU_SEEN[pid] = (secs, now)
     if not prev:
         return True  # first sighting: give it the benefit of the doubt
-    rate = (ticks - prev[0]) / CLK_TCK / max(now - prev[1], 0.1)
+    rate = (secs - prev[0]) / max(now - prev[1], 0.1)
     return rate > 0.02  # >2% of a core
 
 
@@ -626,7 +804,7 @@ def gemini_agent(f, mtime, cwd_by_hash, cfg):
     return info
 
 
-def gather_agents(cfg):
+def gather_agents(cfg, procs=None):
     now = time.time()
     keep = now - max(cfg["agent_active_seconds"], cfg["agent_waiting_seconds"])
     agents = []
@@ -665,16 +843,11 @@ def gather_agents(cfg):
     if gem.exists():
         import hashlib
         cwd_by_hash = {}
-        for d in Path("/proc").iterdir():
-            if d.name.isdigit():
-                try:
-                    comm = (d / "comm").read_text().strip()
-                except OSError:
-                    continue
-                if agent_tool_for(int(d.name), comm) == "gemini":
-                    cwd = proc_cwd(int(d.name))
-                    for c in filter(None, [cwd, resolve_project(cwd)[1]]):
-                        cwd_by_hash[hashlib.sha256(c.encode()).hexdigest()] = c
+        for pid, (name, _, _, exe) in (procs or {}).items():
+            if agent_tool_for(pid, name, exe) == "gemini":
+                cwd = proc_cwd(pid)
+                for c in filter(None, [cwd, resolve_project(cwd)[1]]):
+                    cwd_by_hash[hashlib.sha256(c.encode()).hexdigest()] = c
         for f in gem.glob("*/chats/*.json"):
             try:
                 m = f.stat().st_mtime
@@ -798,22 +971,23 @@ def snapshot(cfg):
                 s["roots"][name] = root
 
     # App launch time = oldest process of that app whose parent isn't the same app.
-    for pid, (comm, ppid, start) in procs.items():
-        tool = APP_PROCS.get(comm)
+    for pid, (comm, ppid, start, exe) in procs.items():
+        tool = app_tool(comm, exe)
         if tool and procs.get(ppid, ("",))[0] != comm:
             rs = state[tool]["running_since"]
             state[tool]["running_since"] = min(rs, start) if rs else start
 
-    agents = gather_agents(cfg)
+    agents = gather_agents(cfg, procs)
     # CLI agents found by process (Grok Build, Muse Code, and Gemini when it
     # has no session file yet). Busy while it's using CPU, else waiting on you.
     logged = {(a["tool"], a["cwd"]) for a in agents}
-    for pid, (comm, ppid, start) in procs.items():
-        tool = agent_tool_for(pid, comm)
+    for pid, (comm, ppid, start, exe) in procs.items():
+        tool = agent_tool_for(pid, comm, exe)
         if tool not in PROC_AGENTS:
             continue
-        if procs.get(ppid, ("",))[0] == comm:
-            continue  # a worker of an agent we already counted
+        parent = procs.get(ppid)
+        if parent and (parent[0] == comm or agent_tool_for(ppid, parent[0], parent[3]) == tool):
+            continue  # a worker/child of an agent we already counted
         cwd = proc_cwd(pid)
         rs = state[tool]["running_since"]
         state[tool]["running_since"] = min(rs, start) if rs else start
@@ -830,19 +1004,19 @@ def snapshot(cfg):
         state[a["tool"]]["agents"].append(a)
         add_project(a["tool"], a["project"], root, 2)  # agents rank above open windows
 
-    for w in all_windows():
-        tool = window_tool(w)
-        if tool in EDITORS:
+    win, windows = desktop_windows(procs)
+    for w in windows:
+        if w["tool"] in EDITORS:
             name = editor_project(w["title"])
-            add_project(tool, name, root_for_name(name) if name else None)
+            add_project(w["tool"], name, root_for_name(name) if name else None)
 
-    win = active_window()
     if win:
-        tool = window_tool(win)
-        if tool is None and set(win["cls"]) & TERMINALS and win["pid"]:
-            hits = [(procs[c][2], agent_tool_for(c, procs[c][0]))
-                    for c in descendants(kids, win["pid"])
-                    if c in procs and agent_tool_for(c, procs[c][0])]
+        tool = win["tool"]
+        if tool is None and win["terminal"] and win["pid"]:
+            # A CLI agent running in the focused terminal.
+            hits = [(procs[c][2], agent_tool_for(c, procs[c][0], procs[c][3]))
+                    for c in descendants(kids, win["pid"]) if c in procs]
+            hits = [h for h in hits if h[1]]
             if hits:
                 tool = max(hits)[1]
         if tool:
@@ -1086,6 +1260,66 @@ def build_activity(cfg, tool, s, totals, streak, tick):
 
 # ------------------------------------------------------- Discord IPC ----
 
+class _SocketConn:
+    """Discord IPC over a Unix domain socket (Linux, macOS)."""
+    def __init__(self, path):
+        self.s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.s.settimeout(5)
+        try:
+            self.s.connect(path)
+        except OSError:
+            self.s.close()
+            raise
+
+    def send(self, data):
+        self.s.sendall(data)
+
+    def recv(self, n):
+        return self.s.recv(n)
+
+    def close(self):
+        self.s.close()
+
+
+class _PipeConn:
+    """Discord IPC over a Windows named pipe (\\\\.\\pipe\\discord-ipc-N)."""
+    def __init__(self, path):
+        self.f = open(path, "r+b", buffering=0)
+
+    def send(self, data):
+        self.f.write(data)
+
+    def recv(self, n):
+        return self.f.read(n)
+
+    def close(self):
+        self.f.close()
+
+
+def ipc_paths():
+    """Every place Discord's IPC endpoint might be (stable, PTB, Canary use 0-9)."""
+    if IS_WIN:
+        for i in range(10):
+            yield rf"\\.\pipe\discord-ipc-{i}"
+        return
+    bases = [os.environ.get(k) for k in ("XDG_RUNTIME_DIR", "TMPDIR", "TMP", "TEMP")]
+    if hasattr(os, "getuid"):
+        bases.append(f"/run/user/{os.getuid()}")
+    if IS_MAC and not os.environ.get("TMPDIR"):
+        bases.append(run("getconf", "DARWIN_USER_TEMP_DIR"))  # launchd may not set TMPDIR
+    bases.append("/tmp")
+    subs = ["", "snap.discord", "app/com.discordapp.Discord",
+            ".flatpak/com.discordapp.Discord/xdg-run"]
+    seen = set()
+    for b in filter(None, bases):
+        for sub in subs:
+            for i in range(10):
+                path = os.path.join(b, sub, f"discord-ipc-{i}")
+                if path not in seen:
+                    seen.add(path)
+                    yield path
+
+
 class DiscordIPC:
     MIN_GAP = 4.5  # Discord allows ~5 updates per 20 s per app
 
@@ -1095,44 +1329,31 @@ class DiscordIPC:
         self.shown = None
         self.last_sent = 0.0
 
-    def _paths(self):
-        bases = [os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"), "/tmp"]
-        subs = ["", "snap.discord/", "app/com.discordapp.Discord/",
-                ".flatpak/com.discordapp.Discord/xdg-run/"]
-        for b in bases:
-            for s in subs:
-                for i in range(10):
-                    yield f"{b}/{s}discord-ipc-{i}"
-
     def _send(self, op, payload):
         data = json.dumps(payload).encode()
-        self.sock.sendall(struct.pack("<II", op, len(data)) + data)
+        self.sock.send(struct.pack("<II", op, len(data)) + data)
 
-    def _recv(self):
-        hdr = self.sock.recv(8)
-        if len(hdr) < 8:
-            raise ConnectionError("discord closed socket")
-        op, n = struct.unpack("<II", hdr)
+    def _read(self, n):
         buf = b""
         while len(buf) < n:
             chunk = self.sock.recv(n - len(buf))
             if not chunk:
-                raise ConnectionError("discord closed socket")
+                raise ConnectionError("discord closed the connection")
             buf += chunk
-        return op, json.loads(buf)
+        return buf
+
+    def _recv(self):
+        op, n = struct.unpack("<II", self._read(8))
+        return op, json.loads(self._read(n))
 
     def connect(self):
-        for path in self._paths():
-            if not os.path.exists(path):
+        for path in ipc_paths():
+            if not IS_WIN and not os.path.exists(path):
                 continue
-            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            s.settimeout(5)
             try:
-                s.connect(path)
+                self.sock = (_PipeConn if IS_WIN else _SocketConn)(path)
             except OSError:
-                s.close()
                 continue
-            self.sock = s
             self._send(0, {"v": 1, "client_id": self.client_id})
             _, resp = self._recv()
             if resp.get("evt") != "READY":
@@ -1182,7 +1403,26 @@ def activities(cfg, tick, live=None):
     return {t: build_activity(cfg, t, s, totals, streak, tick) for t, s in live.items()}
 
 
+PID_FILE = STATE_DIR / "agent-presence.pid"
+
+
+def already_running():
+    """PID of another running copy of this script, if any."""
+    try:
+        pid = int(PID_FILE.read_text())
+    except (OSError, ValueError):
+        return None
+    if pid == os.getpid():
+        return None
+    return pid if "ai_presence" in proc_cmdline(pid) else None
+
+
 def main():
+    other = already_running()
+    if other:
+        sys.exit(f"agent-presence is already running (pid {other}).")
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    PID_FILE.write_text(str(os.getpid()))
     cfg = load_config()
     ids = client_ids(cfg)
     if not ids:
@@ -1223,12 +1463,49 @@ def main():
 
 VERBS = {PLAYING: "Playing", WATCHING: "Watching", COMPETING: "Competing in"}
 SERVICE = "ai-presence"
+SCRIPT = Path(__file__).resolve()
 UNIT_PATH = HOME / f".config/systemd/user/{SERVICE}.service"
+PLIST_LABEL = "com.agentpresence"
+PLIST_PATH = HOME / f"Library/LaunchAgents/{PLIST_LABEL}.plist"
+MAC_LOG = HOME / "Library/Logs/agent-presence.log"
+WIN_STARTUP = Path(os.environ.get("APPDATA", HOME / "AppData/Roaming")) / \
+    "Microsoft/Windows/Start Menu/Programs/Startup/agent-presence.vbs"
 APP_BINARIES = {"claude": ["claude-desktop", "claude"], "chatgpt": ["chatgpt", "codex"],
                 "gemini": ["gemini"], "muse": ["muse"], "copilot": ["copilot"],
                 "opencode": ["opencode"], "aider": ["aider"], "windsurf": ["windsurf"],
                 "kiro": ["kiro"],
                 "grok": ["grok", "grok-bot"], "cursor": ["cursor"], "vscode": ["code"]}
+# Where the desktop apps install, for `doctor` on macOS / Windows.
+MAC_APP_PATHS = {"claude": "Claude.app", "chatgpt": "ChatGPT.app", "cursor": "Cursor.app",
+                 "vscode": "Visual Studio Code.app", "windsurf": "Windsurf.app", "kiro": "Kiro.app"}
+WIN_APP_PATHS = {"claude": "AnthropicClaude", "cursor": "Programs/cursor",
+                 "vscode": "Programs/Microsoft VS Code", "windsurf": "Programs/Windsurf",
+                 "kiro": "Programs/Kiro"}
+
+
+def find_app(tool):
+    import shutil
+    for b in APP_BINARIES[tool]:
+        hit = shutil.which(b)
+        if hit:
+            return hit
+    if IS_MAC and tool in MAC_APP_PATHS:
+        for base in (Path("/Applications"), HOME / "Applications"):
+            if (base / MAC_APP_PATHS[tool]).exists():
+                return str(base / MAC_APP_PATHS[tool])
+    if IS_WIN and tool in WIN_APP_PATHS:
+        p = Path(os.environ.get("LOCALAPPDATA", "")) / WIN_APP_PATHS[tool]
+        if p.exists():
+            return str(p)
+    return None
+
+
+def log_hint():
+    if IS_LINUX:
+        return "journalctl --user -u ai-presence -f"
+    if IS_MAC:
+        return f"tail -f {MAC_LOG}"
+    return f"type {STATE_DIR / 'agent-presence.log'}"
 
 
 def cmd_detect():
@@ -1257,55 +1534,135 @@ def cmd_doctor():
     import shutil
     cfg = load_config()
     ok = lambda b: "✓" if b else "✗"
-    print(f"{ok(os.environ.get('DISPLAY'))} X11 display: {os.environ.get('DISPLAY') or 'not set'}"
-          f" (session: {os.environ.get('XDG_SESSION_TYPE', '?')})")
-    print(f"{ok(shutil.which('xprop'))} xprop installed")
-    ipc = next((p for p in DiscordIPC('')._paths() if os.path.exists(p)), None)
-    print(f"{ok(ipc)} Discord running: {ipc or 'no IPC socket found'}")
+    plat = "Windows" if IS_WIN else "macOS" if IS_MAC else "Linux"
+    print(f"  platform: {plat} · Python {sys.version.split()[0]}")
+    if IS_LINUX:
+        print(f"{ok(os.environ.get('DISPLAY'))} X11 display: {os.environ.get('DISPLAY') or 'not set'}"
+              f" (session: {os.environ.get('XDG_SESSION_TYPE', '?')})")
+        print(f"{ok(shutil.which('xprop'))} xprop installed (window detection)")
+    else:
+        print(f"{ok(psutil)} psutil installed" + ("" if psutil else " — run: pip install psutil"))
+    if IS_MAC:
+        front = run("osascript", "-e", MAC_SCRIPT)
+        print(f"{ok(front)} window detection (System Events)")
+        if front and "\t\n" in front.split("\n", 1)[0] + "\n":
+            print("  ! no window titles: allow Accessibility for your terminal / Python in"
+                  " System Settings → Privacy & Security → Accessibility")
+    ipc = None
+    for path in ipc_paths():
+        if IS_WIN:
+            try:
+                open(path, "r+b", buffering=0).close()
+                ipc = path
+                break
+            except OSError:
+                continue
+        elif os.path.exists(path):
+            ipc = path
+            break
+    print(f"{ok(ipc)} Discord running: {ipc or 'no IPC endpoint found (is the desktop app open?)'}")
     ids = client_ids(cfg)
     for tool in TOOLS:
-        found = next((b for b in APP_BINARIES[tool] if shutil.which(b)), None)
+        found = find_app(tool)
         card = ("card on" + (f", {len(ids[tool])} names" if len(ids[tool]) > 1 else "")
                 if tool in ids else "no Application ID (card off)")
-        print(f"{ok(found)} {TOOL_NAMES[tool]:16} {('found ' + found) if found else 'not found':22} {card}")
-    print(f"{ok(UNIT_PATH.exists())} service installed: {UNIT_PATH}")
+        where = ("found " + Path(found).name) if found else "not found"
+        print(f"{ok(found)} {TOOL_NAMES[tool]:16} {where:24} {card}")
+    autostart = UNIT_PATH if IS_LINUX else PLIST_PATH if IS_MAC else WIN_STARTUP
+    print(f"{ok(autostart.exists())} starts at login: {autostart}")
     print(f"  config: {CONFIG_PATH}")
+    print(f"  log:    {log_hint()}")
 
 
-def cmd_setup():
+def stop_running_copies():
+    """Stop other copies of `ai_presence.py run` (Windows has no service manager)."""
+    procs, _ = proc_table()
+    for pid in procs:
+        if pid != os.getpid() and "ai_presence" in (cmd := proc_cmdline(pid)) and "\x00run" in cmd:
+            try:
+                psutil.Process(pid).terminate() if psutil else os.kill(pid, 15)
+            except Exception:
+                pass
+
+
+def cmd_setup(dry_run=False):
     import shutil
-    if not shutil.which("systemctl"):
-        sys.exit("systemd not found; run `agent-presence run` from your session's autostart instead.")
     load_config()  # writes a default config if missing
-    UNIT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    UNIT_PATH.write_text(f"""[Unit]
+    py = sys.executable
+    if IS_LINUX:
+        if not shutil.which("systemctl"):
+            sys.exit("systemd not found; run `agent-presence run` from your session's autostart instead.")
+        target, body = UNIT_PATH, f"""[Unit]
 Description=Discord Rich Presence for AI coding tools
 After=graphical-session.target
 PartOf=graphical-session.target
 
 [Service]
-ExecStart={sys.executable} {Path(__file__).resolve()} run
+ExecStart={py} {SCRIPT} run
 Restart=always
 RestartSec=20
 Environment=DISPLAY={os.environ.get('DISPLAY', ':0')}
 
 [Install]
 WantedBy=graphical-session.target
-""")
-    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
-    subprocess.run(["systemctl", "--user", "enable", "--now", SERVICE], check=True)
-    subprocess.run(["systemctl", "--user", "restart", SERVICE], check=True)
+"""
+    elif IS_MAC:
+        target, body = PLIST_PATH, f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{PLIST_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array><string>{py}</string><string>{SCRIPT}</string><string>run</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>StandardOutPath</key><string>{MAC_LOG}</string>
+  <key>StandardErrorPath</key><string>{MAC_LOG}</string>
+</dict>
+</plist>
+"""
+    else:
+        pyw = Path(py).with_name("pythonw.exe")
+        pyw = str(pyw) if pyw.exists() else py
+        target, body = WIN_STARTUP, (
+            'CreateObject("WScript.Shell").Run """{}"" ""{}"" run", 0, False\r\n'.format(pyw, SCRIPT))
+    if dry_run:
+        print(f"would write {target}:\n{body}")
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(body)
+    if IS_LINUX:
+        subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+        subprocess.run(["systemctl", "--user", "enable", "--now", SERVICE], check=True)
+        subprocess.run(["systemctl", "--user", "restart", SERVICE], check=True)
+    elif IS_MAC:
+        dom = f"gui/{os.getuid()}"
+        subprocess.run(["launchctl", "bootout", dom, str(target)], capture_output=True)
+        if subprocess.run(["launchctl", "bootstrap", dom, str(target)]).returncode:
+            subprocess.run(["launchctl", "load", "-w", str(target)], check=True)
+    else:
+        stop_running_copies()
+        subprocess.Popen([pyw, str(SCRIPT), "run"], close_fds=True,
+                         creationflags=0x00000008 | 0x08000000)  # detached, no window
     print("Installed and started. It will start on every login.\n")
     cmd_doctor()
     print("\nPreview your cards:  agent-presence detect"
-          "\nLive log:            journalctl --user -u ai-presence -f")
+          f"\nLive log:            {log_hint()}")
 
 
 def cmd_uninstall():
-    subprocess.run(["systemctl", "--user", "disable", "--now", SERVICE])
-    UNIT_PATH.unlink(missing_ok=True)
-    subprocess.run(["systemctl", "--user", "daemon-reload"])
-    print(f"Service removed. Config left at {CONFIG_PATH}.")
+    if IS_LINUX:
+        subprocess.run(["systemctl", "--user", "disable", "--now", SERVICE])
+        UNIT_PATH.unlink(missing_ok=True)
+        subprocess.run(["systemctl", "--user", "daemon-reload"])
+    elif IS_MAC:
+        subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}", str(PLIST_PATH)])
+        PLIST_PATH.unlink(missing_ok=True)
+    else:
+        WIN_STARTUP.unlink(missing_ok=True)
+        stop_running_copies()
+    print(f"Removed. Config left at {CONFIG_PATH}.")
 
 
 def cli():
@@ -1313,15 +1670,24 @@ def cli():
     ap = argparse.ArgumentParser(prog="agent-presence",
                                  description="Discord Rich Presence for AI coding tools.")
     sub = ap.add_subparsers(dest="cmd")
-    sub.add_parser("run", help="run in the foreground (what the service runs)")
+    sub.add_parser("run", help="run in the foreground (what the login service runs)")
     sub.add_parser("detect", help="preview every card and rotating line")
-    sub.add_parser("setup", help="install and start the login service")
+    sp = sub.add_parser("setup", help="install and start the login service")
+    sp.add_argument("--dry-run", action="store_true", help="print what would be installed")
     sub.add_parser("uninstall", help="stop and remove the login service")
-    sub.add_parser("doctor", help="check Discord, X11 and which apps are found")
+    sub.add_parser("doctor", help="check Discord, window detection and which apps are found")
     args, _ = ap.parse_known_args(["detect" if a == "--detect" else a for a in sys.argv[1:]])
-    {"detect": cmd_detect, "setup": cmd_setup, "uninstall": cmd_uninstall,
+    if args.cmd == "setup":
+        return cmd_setup(args.dry_run)
+    {"detect": cmd_detect, "uninstall": cmd_uninstall,
      "doctor": cmd_doctor}.get(args.cmd, main)()
 
 
 if __name__ == "__main__":
+    if IS_WIN:  # emoji in card text
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.reconfigure(encoding="utf-8")
+            except Exception:
+                pass
     cli()
