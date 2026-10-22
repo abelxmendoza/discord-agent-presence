@@ -4,6 +4,8 @@ Card art loaded straight from this folder by URL. Any missing file is skipped,
 so it's fine to add these a few at a time. All PNG, 1024×1024.
 See [../IMAGE_PROMPTS.md](../IMAGE_PROMPTS.md) for the generation prompt.
 
+Done so far: `claude` and `chatgpt` (all three moods), `hero`.
+
 **Big picture** (app × mood), with `<app>.png` and `logo.png` used as fallbacks:
 `claude_cooking` `claude_waiting` `claude_idle` · `chatgpt_*` · `grok_*` · `cursor_*` · `vscode_*`
 

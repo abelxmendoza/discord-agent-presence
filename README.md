@@ -1,4 +1,13 @@
-# discord-agent-presence
+<p align="center">
+  <img src="images/hero.png" alt="Neon robot mascots coding with Claude and ChatGPT" width="720">
+</p>
+
+<h1 align="center">discord-agent-presence</h1>
+
+<p align="center">
+  <a href="https://github.com/abelxmendoza/discord-agent-presence/releases/latest"><img src="https://img.shields.io/badge/⬇_Download-latest_release-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Download latest release"></a>
+  <a href="#install"><img src="https://img.shields.io/badge/One--line_install-curl_%7C_bash-22D3EE?style=for-the-badge&logo=gnubash&logoColor=white" alt="One-line install"></a>
+</p>
 
 Discord Rich Presence for AI coding tools: **Claude Desktop, ChatGPT / Codex,
 Grok Build, Cursor and VS Code**. It shows which projects you're working on, how
