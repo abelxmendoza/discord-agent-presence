@@ -110,6 +110,24 @@ git clone https://github.com/abelxmendoza/discord-agent-presence && ./discord-ag
 
 Live log: see the table above.
 
+### One card for everything, no Discord setup
+
+Out of the box, every tool shares one **combined card** that runs on the
+built-in "Coding" / "Vibe Coding" Discord apps. Its big picture switches to
+whichever tool you're using (the focused one, else the one with the busiest
+agents), and its lines cover every agent:
+
+```
+Watching Vibe Coding
+▸ px4-autonomous-mission ✦ Omega-Code
+  ↻ ⚡ 3 agents cooking · Claude 2 · Codex 1
+  ↻ 🧰 Claude · Cursor · VS Code
+```
+
+Discord shows one card per Discord app, so this is a single card. If you'd
+rather have a separate "Playing Cursor" card per tool, give that tool its own
+app (below), and it moves out of the combined card.
+
 ### Use your own Discord applications (optional)
 
 To change the name after "Playing" or the app icon, create an application at
@@ -164,7 +182,7 @@ spot in the member list.
 | `hide_projects` | [] | Shown as "private project"; no git/CI/button for them |
 | `show_project`, `show_files`, `show_git`, `show_streak`, `show_model`, `show_ci` | true | Toggle each line |
 | `github_button`, `promo_button`, `mood_verbs`, `show_stats`, `show_milestones` | true | |
-| `client_ids` | shared apps | Your own Application ID per app, or `"off"` |
+| `client_ids` | shared apps | Your own Application ID per app (or a list for several names), or `"off"`. `combined` is the shared card; set it to `"off"` to disable it |
 | `images` | `"url"` | `"url"` (PNGs at `image_base_url`), `"assets"` (uploaded per Discord app) or `"none"` |
 
 **Privacy:** everything on the card is visible to anyone who can see your

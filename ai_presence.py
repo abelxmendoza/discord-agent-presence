@@ -41,7 +41,7 @@ DEFAULT_CONFIG = {
     # Set an app to "off" to never show its card. A list of IDs gives the
     # card several names (e.g. ["<Coding id>", "<Vibe Coding id>"]); see
     # name_mode for how it picks.
-    "client_ids": {"claude": "", "chatgpt": "", "grok": "", "gemini": "", "muse": "",
+    "client_ids": {"combined": "", "claude": "", "chatgpt": "", "grok": "", "gemini": "", "muse": "",
                    "copilot": "", "opencode": "", "aider": "",
                    "cursor": "", "windsurf": "", "kiro": "", "vscode": ""},
     "poll_seconds": 5,
@@ -86,8 +86,11 @@ DEFAULT_CONFIG = {
 # Shared Discord applications, so the cards work with zero setup.
 # Application IDs are public identifiers, not secrets.
 SHARED_CLIENT_IDS = {
-    # "Coding" while you type, "Vibe Coding" while agents work (name_mode).
-    "claude": ["1562634034390114445", "1562654272749965452"],
+    # One card for every tool that has no Discord app of its own: "Coding"
+    # while you type, "Vibe Coding" while agents work (name_mode). The big
+    # picture and lines follow whichever tool you're using.
+    "combined": ["1562634034390114445", "1562654272749965452"],
+    "claude": "",
     "chatgpt": "",
     "grok": "",
     "gemini": "",
@@ -109,7 +112,7 @@ EDITORS = {"cursor", "windsurf", "kiro", "vscode"}
 TOOL_NAMES = {"claude": "Claude", "chatgpt": "ChatGPT · Codex", "grok": "Grok Build",
               "gemini": "Gemini", "muse": "Muse Code", "copilot": "GitHub Copilot",
               "opencode": "OpenCode", "aider": "Aider", "windsurf": "Windsurf", "kiro": "Kiro",
-              "cursor": "Cursor", "vscode": "VS Code"}
+              "cursor": "Cursor", "vscode": "VS Code", "combined": "Combined card"}
 # Desktop app main processes -> tool. Process names are compared lowercased
 # with any ".exe" removed.
 APP_PROCS = {"claude-desktop": "claude", "chatgpt": "chatgpt", "grok-bot": "grok",
@@ -182,7 +185,7 @@ def client_ids(cfg):
     """App -> list of Application IDs: user's own, else the shared ones;
     "off" disables the card."""
     ids = {}
-    for tool in TOOLS:
+    for tool in ["combined", *TOOLS]:
         mine = cfg["client_ids"].get(tool) or ""
         if isinstance(mine, str) and mine.strip().lower() == "off":
             continue
@@ -1250,9 +1253,10 @@ def image(cfg, *keys):
         return None
     for key in keys:
         if key:
-            url = f"{cfg['image_base_url'].rstrip('/')}/{key}.png"
-            if url_exists(url):
-                return url
+            for ext in ("jpg", "png"):
+                url = f"{cfg['image_base_url'].rstrip('/')}/{key}.{ext}"
+                if url_exists(url):
+                    return url
     return None
 
 
@@ -1324,11 +1328,21 @@ def card_lines(cfg, tool, s, streak):
             text = f"⚡ {plural(len(busy), 'agent')} cooking"
         else:
             text = f"⏳ {plural(len(waiting), 'agent')} waiting for me"
+        per_tool = {}
+        for a in agents:
+            per_tool[a["tool"]] = per_tool.get(a["tool"], 0) + 1
+        if len(per_tool) > 1:  # combined card: "· Claude 2 · Codex 1"
+            text += "".join(f" · {TOOL_NAMES[t].split(' ·')[0]} {n}"
+                            for t, n in sorted(per_tool.items(), key=lambda kv: -kv[1]))
         add(text, count_badge, count_hover, [len(busy), len(agents)] if len(agents) > 1 else None)
     elif s["focused"]:
         add("● hands on keyboard")
     else:
         add("○ open in the background")
+
+    # 1b. On the combined card: which tools are open right now.
+    if len(s.get("tools", [])) > 1:
+        add("🧰 " + " · ".join(TOOL_NAMES[t].split(" ·")[0] for t in s["tools"]))
 
     # 2. What each busy agent is doing right now (newest first, up to 3).
     for a in sorted(busy, key=lambda a: -a["mtime"])[:3]:
@@ -1346,7 +1360,9 @@ def card_lines(cfg, tool, s, streak):
 
     # 3b. Agent time and tokens today for this app.
     if cfg["show_stats"]:
-        secs, tok = today_stats().get(tool, (0, 0))
+        stats = today_stats()
+        secs = sum(stats.get(t, (0, 0))[0] for t in s.get("tools", [tool]))
+        tok = sum(stats.get(t, (0, 0))[1] for t in s.get("tools", [tool]))
         bits = []
         if secs >= 60:
             bits.append(f"⏱ {human_duration(secs)} of agent time today")
@@ -1436,10 +1452,13 @@ def build_activity(cfg, tool, s, totals, streak, tick):
 
     # Big picture: the app in its current mood. Small badge: follows the line.
     m = mood(s, cfg)
-    large = image(cfg, f"{tool}_{m}", f"{tool}_{MOOD_FALLBACK.get(m, m)}", tool, "logo")
+    # The sim control room has no app logo in it, so every tool can share it.
+    large = image(cfg, f"{tool}_{m}", "claude_sim" if m == "sim" else None,
+                  f"{tool}_{MOOD_FALLBACK.get(m, m)}", tool, "logo")
     if large:
         across = (f"{plural(totals['agents'], 'agent')} across {plural(totals['tools'], 'app')}"
-                  if totals["tools"] > 1 else f"{TOOL_NAMES[tool]} · {MOOD_TEXT[m]}")
+                  if totals["tools"] > 1 and not s.get("tools")
+                  else f"{TOOL_NAMES[tool]} · {MOOD_TEXT[m]}")
         act["assets"] = {"large_image": large, "large_text": clip(across)}
         small = image(cfg, line["badge"], f"agents_{min(len(agents), 9)}" if agents else None)
         if small:
@@ -1584,13 +1603,48 @@ class DiscordIPC:
 
 # --------------------------------------------------------------- main ----
 
-def activities(cfg, tick, live=None):
+def merge_states(live):
+    """Fold several tools' states into one for the combined card. Returns
+    (primary tool, merged state). Primary = the focused tool, else the one
+    with the most busy agents, else the most agents, else the newest app."""
+    def rank(t):
+        st = live[t]
+        return (st["focused"], sum(a["status"] == "busy" for a in st["agents"]),
+                len(st["agents"]), st["running_since"])
+    order = sorted(live, key=rank, reverse=True)
+    primary = order[0]
+    projects, roots = [], {}
+    for t in order:  # the primary tool's projects lead
+        for p in live[t]["projects"]:
+            if p not in projects:
+                projects.append(p)
+        roots.update(live[t]["roots"])
+    return primary, {"tools": order, "agents": [a for t in order for a in live[t]["agents"]],
+                     "projects": projects, "roots": roots,
+                     "focused": any(live[t]["focused"] for t in order),
+                     "running_since": min(live[t]["running_since"] for t in order)}
+
+
+def plan_cards(cfg, live, own):
+    """card key -> (tool shown, state). Tools with their own Discord app get
+    their own card; everything else shares the "combined" card."""
+    cards = {t: (t, live[t]) for t in live if t in own}
+    rest = {t: st for t, st in live.items() if t not in own}
+    if rest:
+        cards["combined"] = merge_states(rest)
+    return cards
+
+
+def activities(cfg, tick, live=None, own=None):
     live = snapshot(cfg) if live is None else live
+    own = set(client_ids(cfg)) - {"combined"} if own is None else own
     roots = {r for s in live.values() for p, r in s["roots"].items()
              if p not in cfg["hide_projects"]}
     streak = update_streak(bool(live), roots) if cfg["show_streak"] else 0
     totals = {"agents": sum(len(s["agents"]) for s in live.values()), "tools": len(live)}
-    return {t: build_activity(cfg, t, s, totals, streak, tick) for t, s in live.items()}
+    cards = plan_cards(cfg, live, own)
+    return ({k: build_activity(cfg, tool, st, totals, streak, tick) for k, (tool, st) in cards.items()},
+            cards)
 
 
 PID_FILE = STATE_DIR / "agent-presence.pid"
@@ -1625,14 +1679,14 @@ def main():
         tick = int(time.time() // cfg["rotate_seconds"])
         try:
             live = snapshot(cfg)
-            acts = activities(cfg, tick, live)
+            acts, cards = activities(cfg, tick, live, set(conns) - {"combined"})
         except Exception as e:  # never let a parsing hiccup kill the cards
             log("snapshot failed:", repr(e))
             time.sleep(cfg["poll_seconds"])
             continue
         for tool, ipcs in conns.items():
             act = acts.get(tool)
-            want = pick_name(cfg, live.get(tool), len(ipcs))
+            want = pick_name(cfg, cards[tool][1] if tool in cards else None, len(ipcs))
             # Clear the names that shouldn't show before setting the one that should,
             # so the card never appears twice.
             order = [i for i in range(len(ipcs)) if i != want] + [want]
@@ -1640,7 +1694,8 @@ def main():
                 ipc = ipcs[i]
                 try:
                     if ipc.update(act if i == want else None) and i == want:
-                        log(f"{TOOL_NAMES[tool]}" + (f" [name {i + 1}]" if len(ipcs) > 1 else "") + ":",
+                        shown = f"{TOOL_NAMES[tool]} → {TOOL_NAMES[cards[tool][0]]}" if tool == "combined" else TOOL_NAMES[tool]
+                        log(shown + (f" [name {i + 1}]" if len(ipcs) > 1 else "") + ":",
                             f"{act['details']} | {act['state']}" if act else "closed")
                 except (OSError, ConnectionError, json.JSONDecodeError) as e:
                     log(f"{TOOL_NAMES[tool]}: discord connection lost:", e)
@@ -1703,12 +1758,18 @@ def cmd_detect():
     live = snapshot(cfg)
     if not live:
         print("No supported apps open and no agents running right now.")
-    roots = {r for s in live.values() for r in s["roots"].values()}
-    streak = update_streak(bool(live), roots)
-    totals = {"agents": sum(len(s["agents"]) for s in live.values()), "tools": len(live)}
-    for tool, s in live.items():
-        act = build_activity(cfg, tool, s, totals, streak, 0)
-        print(f"\n{VERBS[act['type']]} {TOOL_NAMES[tool]}")
+        return
+    ids = client_ids(cfg)
+    acts, cards = activities(cfg, 0, live, set(ids) - {"combined"})
+    streak = update_streak(True, {r for st in live.values() for p, r in st["roots"].items()
+                                  if p not in cfg["hide_projects"]})
+    for key, (tool, s) in cards.items():
+        act = acts[key]
+        n = len(ids.get(key, []))
+        name = (["Coding", "Vibe Coding"][pick_name(cfg, s, 2)] if key == "combined" and n > 1
+                else TOOL_NAMES[tool])
+        print(f"\n{VERBS[act['type']]} {name}" + ("   (combined card: " + ", ".join(
+            TOOL_NAMES[t] for t in s["tools"]) + ")" if key == "combined" else ""))
         print(f"  {act['details']}")
         lines = card_lines(cfg, tool, s, streak)[0]
         print(f"  [big: {tool}_{mood(s, cfg)}]")
@@ -1752,10 +1813,12 @@ def cmd_doctor():
             break
     print(f"{ok(ipc)} Discord running: {ipc or 'no IPC endpoint found (is the desktop app open?)'}")
     ids = client_ids(cfg)
+    if "combined" in ids:
+        print(f"✓ combined card on ({len(ids['combined'])} names) for every tool without its own app")
     for tool in TOOLS:
         found = find_app(tool)
-        card = ("card on" + (f", {len(ids[tool])} names" if len(ids[tool]) > 1 else "")
-                if tool in ids else "no Application ID (card off)")
+        card = ("own card" + (f", {len(ids[tool])} names" if len(ids[tool]) > 1 else "")
+                if tool in ids else "combined card" if "combined" in ids else "no card")
         where = ("found " + Path(found).name) if found else "not found"
         print(f"{ok(found)} {TOOL_NAMES[tool]:16} {where:24} {card}")
     autostart = UNIT_PATH if IS_LINUX else PLIST_PATH if IS_MAC else WIN_STARTUP

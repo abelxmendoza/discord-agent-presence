@@ -138,6 +138,7 @@
   .app { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); font-weight: 600; }
   .app small { color: var(--muted); font-weight: 400; }
   .swatch { width: 10px; height: 10px; border-radius: 50%; }
+  .appicon { width: 28px; height: 28px; border-radius: 8px; margin-left: -6px; }
 
   .moods { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); row-gap: 28px; gap: 16px; }
   .mood { text-align: center; }
@@ -314,20 +315,21 @@
     <div class="sec-head">
       <div class="kicker">Works with</div>
       <h2>The tools you already use</h2>
+      <p>Every tool gets its own mascot and all eight moods. One combined card covers them all, with no Discord setup.</p>
     </div>
     <div class="apps">
-      <div class="app"><span class="swatch" style="background:#f97316"></span>Claude <small>Desktop, Code CLI</small></div>
-      <div class="app"><span class="swatch" style="background:#10b981"></span>ChatGPT · Codex <small>desktop, CLI</small></div>
-      <div class="app"><span class="swatch" style="background:#4285f4"></span>Gemini <small>Gemini CLI</small></div>
-      <div class="app"><span class="swatch" style="background:#8b5cf6"></span>Grok Build <small>CLI, Grok app</small></div>
-      <div class="app"><span class="swatch" style="background:#0866ff"></span>Muse Code <small>Meta</small></div>
-      <div class="app"><span class="swatch" style="background:#e6edf3"></span>GitHub Copilot <small>CLI</small></div>
-      <div class="app"><span class="swatch" style="background:#fab283"></span>OpenCode</div>
-      <div class="app"><span class="swatch" style="background:#14b014"></span>Aider</div>
-      <div class="app"><span class="swatch" style="background:#3b82f6"></span>Cursor</div>
-      <div class="app"><span class="swatch" style="background:#58e6d9"></span>Windsurf</div>
-      <div class="app"><span class="swatch" style="background:#9046ff"></span>Kiro <small>AWS</small></div>
-      <div class="app"><span class="swatch" style="background:#0ea5e9"></span>VS Code <small>incl. the Claude extension</small></div>
+      <div class="app"><img class="appicon" src="assets/icon_claude.webp" alt="" width="28" height="28" loading="lazy">Claude <small>Desktop, Code CLI</small></div>
+      <div class="app"><img class="appicon" src="assets/icon_chatgpt.webp" alt="" width="28" height="28" loading="lazy">ChatGPT · Codex <small>desktop, CLI</small></div>
+      <div class="app"><img class="appicon" src="assets/icon_gemini.webp" alt="" width="28" height="28" loading="lazy">Gemini <small>Gemini CLI</small></div>
+      <div class="app"><img class="appicon" src="assets/icon_grok.webp" alt="" width="28" height="28" loading="lazy">Grok Build <small>CLI, Grok app</small></div>
+      <div class="app"><img class="appicon" src="assets/icon_muse.webp" alt="" width="28" height="28" loading="lazy">Muse Code <small>Meta</small></div>
+      <div class="app"><img class="appicon" src="assets/icon_copilot.webp" alt="" width="28" height="28" loading="lazy">GitHub Copilot <small>CLI</small></div>
+      <div class="app"><img class="appicon" src="assets/icon_opencode.webp" alt="" width="28" height="28" loading="lazy">OpenCode</div>
+      <div class="app"><img class="appicon" src="assets/icon_aider.webp" alt="" width="28" height="28" loading="lazy">Aider</div>
+      <div class="app"><img class="appicon" src="assets/icon_cursor.webp" alt="" width="28" height="28" loading="lazy">Cursor</div>
+      <div class="app"><img class="appicon" src="assets/icon_windsurf.webp" alt="" width="28" height="28" loading="lazy">Windsurf</div>
+      <div class="app"><img class="appicon" src="assets/icon_kiro.webp" alt="" width="28" height="28" loading="lazy">Kiro <small>AWS</small></div>
+      <div class="app"><img class="appicon" src="assets/icon_vscode.webp" alt="" width="28" height="28" loading="lazy">VS Code <small>incl. the Claude extension</small></div>
     </div>
   </div>
 </section>

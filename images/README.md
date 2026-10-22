@@ -1,10 +1,15 @@
 # images
 
 Card art loaded straight from this folder by URL. Any missing file is skipped,
-so it's fine to add these a few at a time. All PNG, 1024×1024.
+so it's fine to add these a few at a time. Square images; `.jpg` is tried first,
+then `.png`. Discord shows them at about 100 px, so 512×512 is plenty.
 See [../IMAGE_PROMPTS.md](../IMAGE_PROMPTS.md) for the generation prompt.
 
-Done so far: `claude` (all eight moods, incl. `push` and `sim`), `chatgpt` (cooking / waiting / idle), `hero`.
+Done so far: `claude` (all eight moods, incl. `push` and `sim`), `chatgpt` (hand-made
+cooking / waiting / idle), and generated sets for every other tool.
+`tools/make_tool_art.py` builds a tool's set from the Claude art: it swaps the
+laptop logo for a neon glyph and recolours the cooking image. Hand-made art
+for any tool simply replaces those files. Also `hero.png` for the README.
 
 **Big picture** (app × mood): `<app>_cooking`, `_waiting`, `_idle`, plus optional
 `_success` (tests/build just passed), `_failed` (failing tests/build or red CI) and

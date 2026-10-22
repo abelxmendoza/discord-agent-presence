@@ -150,6 +150,34 @@ class StatsAndMilestones(unittest.TestCase):
         self.assertIn("🏆 10th commit today", [t for t, _ in found])
 
 
+class CombinedCard(unittest.TestCase):
+    def st(self, focused=False, busy=0, waiting=0, projects=(), since=0.0, tool="claude"):
+        ag = [{"tool": tool, "status": "busy", "action": "✍", "outcome": None}] * busy + \
+             [{"tool": tool, "status": "waiting", "action": "⏳", "outcome": None}] * waiting
+        return {"focused": focused, "agents": ag, "projects": list(projects), "roots": {},
+                "running_since": since}
+
+    def test_primary_is_focused_then_busiest(self):
+        live = {"claude": self.st(busy=2, projects=["px4"], tool="claude"),
+                "cursor": self.st(focused=True, projects=["omega"], tool="cursor")}
+        primary, m = ap.merge_states(live)
+        self.assertEqual(primary, "cursor")
+        self.assertEqual(m["projects"], ["omega", "px4"])
+        self.assertEqual(len(m["agents"]), 2)
+        live["cursor"]["focused"] = False
+        self.assertEqual(ap.merge_states(live)[0], "claude")
+
+    def test_tools_with_own_app_leave_the_combined_card(self):
+        live = {"claude": self.st(busy=1), "vscode": self.st(focused=True, tool="vscode")}
+        cards = ap.plan_cards(ap.DEFAULT_CONFIG, live, own={"vscode"})
+        self.assertEqual(set(cards), {"vscode", "combined"})
+        self.assertEqual(cards["combined"][0], "claude")
+
+    def test_shared_ids_cover_every_tool(self):
+        ids = ap.client_ids(ap.DEFAULT_CONFIG)
+        self.assertEqual(len(ids["combined"]), 2)
+
+
 class Moods(unittest.TestCase):
     def S(self, actions, outcome=None, focused=False):
         return {"focused": focused, "agents": [
