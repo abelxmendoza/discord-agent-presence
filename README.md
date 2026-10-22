@@ -5,7 +5,7 @@
 <h1 align="center">discord-agent-presence</h1>
 
 <p align="center">
-  <a href="https://github.com/abelxmendoza/discord-agent-presence/releases/latest"><img src="https://img.shields.io/badge/⬇_Download-latest_release-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Download latest release"></a>
+  <a href="https://github.com/abelxmendoza/discord-agent-presence/releases/latest/download/AgentPresence-macOS.dmg"><img src="https://img.shields.io/badge/⬇_Download_for_Mac-.dmg-5865F2?style=for-the-badge&logo=apple&logoColor=white" alt="Download for Mac"></a>
   <a href="https://abelxmendoza.github.io/discord-agent-presence/"><img src="https://img.shields.io/badge/Website-live_demo-F97316?style=for-the-badge&logo=githubpages&logoColor=white" alt="Website"></a>
   <a href="https://github.com/abelxmendoza/discord-agent-presence/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/abelxmendoza/discord-agent-presence/test.yml?branch=main&style=for-the-badge&label=tests" alt="Tests"></a>
 </p>
@@ -33,7 +33,19 @@ Works on **Linux, macOS and Windows** with Python 3.9+. No Discord setup needed.
 
 ## Install
 
-**Linux / macOS**
+**macOS:** [**⬇ Download AgentPresence-macOS.dmg**](https://github.com/abelxmendoza/discord-agent-presence/releases/latest/download/AgentPresence-macOS.dmg), open it and
+double-click **Agent Presence**, then click **Install**. No terminal, git or
+Python setup: it brings what it needs and starts at every login. Apple silicon
+and Intel, macOS 11+.
+
+> **First time only:** macOS may say it can't check the app for malware,
+> because it isn't from the App Store. Click **Done**, open **System Settings →
+> Privacy & Security**, scroll down and click **Open Anyway** next to Agent
+> Presence. Open the app again any time to **Update**, **Restart** or
+> **Uninstall**. If your Mac has no Python yet, the app walks you through
+> Apple's free Command Line Tools installer.
+
+**Linux / macOS terminal**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/install.sh | bash
@@ -68,9 +80,10 @@ git clone https://github.com/abelxmendoza/discord-agent-presence && ./discord-ag
 | Window detection | `xprop` (X11) | System Events (needs Accessibility\*) | Win32 API |
 | Logs | `journalctl --user -u ai-presence -f` | `~/Library/Logs/agent-presence.log` | `~\.local\state\ai-presence\agent-presence.log` |
 
-\* On macOS, allow Accessibility for your terminal or Python under System
-Settings → Privacy & Security → Accessibility so it can read editor window
-titles. Without it everything else works; only projects that come from Cursor
+\* On macOS, allow Accessibility for Python under System Settings → Privacy &
+Security → Accessibility so it can read editor window titles. The Mac app's
+**Allow Window Titles…** button opens that page and copies the Python path for
+you. Without it everything else works; only projects that come from Cursor
 or VS Code window titles are missed. `agent-presence doctor` tells you.
 
 ## What's on the card
@@ -194,6 +207,11 @@ python3 -m unittest discover -s tests -v   # also runs in CI on Ubuntu, macOS an
 python3 ai_presence.py detect              # preview without touching Discord
 python3 tools/make_tool_art.py cursor      # rebuild a tool's mood art from the Claude set
 ```
+
+The Mac app is built by `macos/build_app.sh` (on a Mac) and the `macos-app`
+workflow, which smoke-tests it and attaches the .dmg to each release. Set the
+`MACOS_SIGN_IDENTITY` and `APPLE_*` repo secrets to sign and notarize it so it
+opens without the Privacy & Security step.
 
 The tests use synthetic session logs and a fake Discord server (Unix socket or
 Windows named pipe). MIT licensed.

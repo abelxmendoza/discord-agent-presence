@@ -155,6 +155,16 @@
   .step > div { min-width: 0; }
   pre { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; overflow-x: auto; font-size: 13.5px; color: #cfe8ff; margin: 10px 0 0; }
 
+  /* platform tabs */
+  .tabs { display: inline-flex; gap: 4px; padding: 4px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); margin-bottom: 22px; }
+  .tab { border: 0; background: none; color: var(--muted); font: 600 14px var(--sans); padding: 9px 16px; border-radius: 9px; cursor: pointer; }
+  .tab:hover { color: var(--text); }
+  .tab[aria-selected="true"] { background: var(--panel-2); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); }
+  .pane[hidden], .install[hidden] { display: none; }
+  .pane .btn { margin-top: 12px; }
+  .note { margin-top: 10px; font-size: 14.5px; color: var(--muted); border-left: 3px solid var(--orange); padding: 2px 0 2px 12px; }
+  .alt { margin-top: 18px; max-width: 760px; }
+  kbd { font: 600 12.5px var(--mono); padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 6px; background: var(--panel-2); color: var(--text); }
   details { border: 1px solid var(--line); border-radius: 14px; background: var(--panel); padding: 4px 18px; margin-bottom: 10px; }
   summary { cursor: pointer; font-weight: 600; padding: 12px 0; list-style: none; }
   summary::-webkit-details-marker { display: none; }
@@ -210,20 +220,20 @@
       <h1>Your AI agents,<br><span class="grad">live on Discord.</span></h1>
       <p class="lede">Discord already shows "Playing Visual Studio Code". Agent Presence does the same for <b>Claude, Codex, Gemini, Copilot, Cursor, Windsurf, Kiro and more</b>, and adds which projects you're on, how many agents are running and what they're doing right now.</p>
       <div class="ctas">
-        <a class="btn btn-primary" href="https://github.com/abelxmendoza/discord-agent-presence/releases/latest">
+        <a class="btn btn-primary" id="dl" href="https://github.com/abelxmendoza/discord-agent-presence/releases/latest">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-5-5m5 5l5-5M4 21h16"/></svg>
-          Download
+          <span id="dl-label">Download</span>
         </a>
         <a class="btn btn-ghost" href="https://github.com/abelxmendoza/discord-agent-presence">
           <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5a11.5 11.5 0 00-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.68 0-1.25.45-2.28 1.19-3.08-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 015.78 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.8 1.19 1.83 1.19 3.08 0 4.41-2.69 5.38-5.25 5.67.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0012 .5z"/></svg>
           View on GitHub
         </a>
       </div>
-      <div class="install">
+      <div class="install" id="hero-cmd">
         <code><span class="p">$ </span><span class="cmd">curl -fsSL https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/install.sh | bash</span></code>
         <button class="copy" type="button">Copy</button>
       </div>
-      <p class="small">Linux · macOS · Windows · Python 3.9+ · free and open source (MIT) · <a href="#install">Windows install ↓</a></p>
+      <p class="small" id="hero-note">Linux · macOS · Windows · free and open source (MIT) · <a href="#install">All install options ↓</a></p>
     </div>
 
     <div class="stage" aria-label="Preview of a Discord profile with two Agent Presence cards">
@@ -341,16 +351,52 @@
       <h2>Up and running in about a minute</h2>
       <p>No Discord developer setup needed. The cards use shared Discord apps that ship with the tool.</p>
     </div>
-    <div class="steps">
-      <div class="step"><div><h3>Run the installer</h3><p>It downloads the tool, adds the <code>agent-presence</code> command and starts it on login.</p>
-        <p style="margin-top:10px"><b>Linux / macOS</b></p>
+
+    <div class="tabs" role="tablist" aria-label="Your computer">
+      <button class="tab" role="tab" id="tab-mac" aria-controls="pane-mac" aria-selected="true">macOS</button>
+      <button class="tab" role="tab" id="tab-win" aria-controls="pane-win" aria-selected="false">Windows</button>
+      <button class="tab" role="tab" id="tab-linux" aria-controls="pane-linux" aria-selected="false">Linux</button>
+    </div>
+
+    <div class="pane" id="pane-mac" role="tabpanel" aria-labelledby="tab-mac">
+      <div class="steps">
+        <div class="step"><div><h3>Download the installer</h3><p>One file for Apple silicon and Intel Macs, macOS 11 or later.</p>
+          <a class="btn btn-primary" href="https://github.com/abelxmendoza/discord-agent-presence/releases/latest/download/AgentPresence-macOS.dmg">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-5-5m5 5l5-5M4 21h16"/></svg>
+            Download for Mac (.dmg)
+          </a></div></div>
+        <div class="step"><div><h3>Open it and double-click Agent Presence</h3><p>Click <b>Install</b>. It sets everything up and starts by itself at every login. No terminal needed.</p>
+          <p class="note">First time only: macOS may say it can't check the app for malware, because it isn't from the App Store. Click <b>Done</b>, open <b>System Settings → Privacy &amp; Security</b>, scroll down and click <b>Open Anyway</b> next to Agent Presence. The app is open source, so you can read exactly what it does.</p></div></div>
+        <div class="step"><div><h3>Optional: allow window titles</h3><p>Click <b>Allow Window Titles…</b> at the end so projects open in Cursor or VS Code show on your card too. Agents from Claude, Codex and the rest work without it.</p></div></div>
+        <div class="step"><div><h3>Open Discord</h3><p>Start any AI tool and your card shows up on your profile within a few seconds.</p></div></div>
+      </div>
+      <details class="alt"><summary>Update, uninstall, or use the terminal instead</summary>
+        <p>To update, download the new .dmg and open the app again: it offers <b>Update</b>. Open it any time to <b>Restart</b> or <b>Uninstall</b>.</p>
+        <p>Prefer the terminal? This does the same thing:</p>
         <pre>curl -fsSL https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/install.sh | bash</pre>
-        <p style="margin-top:10px"><b>Windows</b> (PowerShell)</p>
-        <pre>irm https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/install.ps1 | iex</pre></div></div>
-      <div class="step"><div><h3>Check everything's found</h3><p>It confirms Discord is running and lists which of your AI apps it detected.</p>
-        <pre>agent-presence doctor</pre></div></div>
-      <div class="step"><div><h3>Preview your cards</h3><p>It prints exactly what Discord will show, line by line. Then open your profile and look.</p>
-        <pre>agent-presence detect</pre></div></div>
+        <p style="margin-top:10px">Then <code>agent-presence doctor</code> checks Discord and lists the apps it found, and <code>agent-presence detect</code> previews your cards.</p></details>
+    </div>
+
+    <div class="pane" id="pane-win" role="tabpanel" aria-labelledby="tab-win" hidden>
+      <div class="steps">
+        <div class="step"><div><h3>Run the installer in PowerShell</h3><p>Needs Python 3.9+ from <a href="https://www.python.org/downloads/">python.org</a> (tick "Add to PATH"). It downloads the tool, adds the <code>agent-presence</code> command and starts it on login.</p>
+          <pre>irm https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/install.ps1 | iex</pre></div></div>
+        <div class="step"><div><h3>Check everything's found</h3><p>It confirms Discord is running and lists which of your AI apps it detected.</p>
+          <pre>agent-presence doctor</pre></div></div>
+        <div class="step"><div><h3>Preview your cards</h3><p>It prints exactly what Discord will show, line by line. Then open your profile and look.</p>
+          <pre>agent-presence detect</pre></div></div>
+      </div>
+    </div>
+
+    <div class="pane" id="pane-linux" role="tabpanel" aria-labelledby="tab-linux" hidden>
+      <div class="steps">
+        <div class="step"><div><h3>Run the installer</h3><p>Needs Python 3.9+ and git. It downloads the tool, adds the <code>agent-presence</code> command and starts it on login with a systemd user service.</p>
+          <pre>curl -fsSL https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/install.sh | bash</pre></div></div>
+        <div class="step"><div><h3>Check everything's found</h3><p>It confirms Discord is running and lists which of your AI apps it detected.</p>
+          <pre>agent-presence doctor</pre></div></div>
+        <div class="step"><div><h3>Preview your cards</h3><p>It prints exactly what Discord will show, line by line. Then open your profile and look.</p>
+          <pre>agent-presence detect</pre></div></div>
+      </div>
     </div>
   </div>
 </section>
@@ -370,7 +416,7 @@
     <details><summary>Can I rename the cards or use my own icons?</summary>
       <p>Yes. Create your own application in the Discord Developer Portal and put its ID under <code>client_ids</code>. Point <code>image_base_url</code> at your own art for custom pictures.</p></details>
     <details><summary>Does it work on Mac and Windows?</summary>
-      <p>Yes. It runs on Linux (X11), macOS and Windows, and it's tested on all three. On a Mac, allow Accessibility for your terminal in System Settings → Privacy &amp; Security so it can read editor window titles. <code>agent-presence doctor</code> tells you if that's missing. Linux on Wayland can't read window titles yet, but agents and session logs still work.</p></details>
+      <p>Yes. It runs on Linux (X11), macOS and Windows, and it's tested on all three. On a Mac, download the .dmg and double-click the app; it has a button that walks you through allowing window titles (Accessibility) for editor projects. <code>agent-presence doctor</code> tells you if that's missing. Linux on Wayland can't read window titles yet, but agents and session logs still work.</p></details>
     <details><summary>Can I add another tool, like Windsurf, Zed or Aider?</summary>
       <p>Yes. Each tool is a few lines saying how to find its process, window and session logs. Open a pull request on GitHub.</p></details>
   </div>
@@ -380,13 +426,13 @@
   <div class="wrap">
     <div class="final">
       <h2>Let your friends watch you <span class="grad">cook</span>.</h2>
-      <p class="small" style="font-size:16px">Free, open source, one command.</p>
+      <p class="small" style="font-size:16px">Free, open source, about a minute to set up.</p>
       <div class="install">
         <code><span class="p">$ </span><span class="cmd">curl -fsSL https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/install.sh | bash</span></code>
         <button class="copy" type="button">Copy</button>
       </div>
       <div class="ctas">
-        <a class="btn btn-primary" href="https://github.com/abelxmendoza/discord-agent-presence/releases/latest">Download</a>
+        <a class="btn btn-primary" data-dl href="https://github.com/abelxmendoza/discord-agent-presence/releases/latest">Download</a>
         <a class="btn btn-ghost" href="https://github.com/abelxmendoza/discord-agent-presence">Star on GitHub</a>
       </div>
     </div>
@@ -401,6 +447,42 @@
 </div>
 
 <script>
+  // Pick the visitor's platform: Mac gets the .dmg, Windows the PowerShell line.
+  (() => {
+    const ua = navigator.userAgent, plat = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || "";
+    const os = /Mac|iPhone|iPad/i.test(plat + ua) ? "mac" : /Win/i.test(plat + ua) ? "win" : /Linux|X11|CrOS/i.test(plat + ua) ? "linux" : "mac";
+    const DMG = "https://github.com/abelxmendoza/discord-agent-presence/releases/latest/download/AgentPresence-macOS.dmg";
+    const WIN = "irm https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/install.ps1 | iex";
+    const dl = document.getElementById("dl"), label = document.getElementById("dl-label");
+    const heroCmd = document.getElementById("hero-cmd"), heroNote = document.getElementById("hero-note");
+    if (os === "mac") {
+      dl.href = DMG; label.textContent = "Download for Mac";
+      document.querySelectorAll("[data-dl]").forEach(a => { a.href = DMG; a.textContent = "Download for Mac"; });
+      heroCmd.hidden = true;
+      heroNote.innerHTML = "Apple silicon &amp; Intel · macOS 11+ · double-click to install, no terminal · free and open source (MIT) · <a href=\"#install\">Windows &amp; Linux ↓</a>";
+    } else {
+      dl.href = "#install"; label.textContent = os === "win" ? "Install on Windows" : "Install on Linux";
+      document.querySelectorAll("[data-dl]").forEach(a => { a.href = "#install"; a.textContent = label.textContent; });
+      if (os === "win") heroCmd.querySelector(".cmd").textContent = WIN;
+      heroNote.innerHTML = "Linux · macOS · Windows · free and open source (MIT) · <a href=\"#install\">Mac app &amp; other options ↓</a>";
+    }
+    // Tabs
+    const tabs = [...document.querySelectorAll(".tab")];
+    const show = id => tabs.forEach(t => {
+      const on = t.id === "tab-" + id;
+      t.setAttribute("aria-selected", on); t.tabIndex = on ? 0 : -1;
+      document.getElementById(t.getAttribute("aria-controls")).hidden = !on;
+    });
+    tabs.forEach((t, i) => {
+      t.addEventListener("click", () => show(t.id.slice(4)));
+      t.addEventListener("keydown", e => {
+        const d = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+        if (d) { const n = tabs[(i + d + tabs.length) % tabs.length]; show(n.id.slice(4)); n.focus(); }
+      });
+    });
+    show(os);
+  })();
+
   // Copy buttons
   document.querySelectorAll(".copy").forEach(btn => {
     btn.addEventListener("click", async () => {

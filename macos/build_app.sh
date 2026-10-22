@@ -49,10 +49,7 @@ rm -rf "$ICONSET"
 
 echo "==> Info.plist"
 PLIST="$APP/Contents/Info.plist"
-setp() {
-  /usr/libexec/PlistBuddy -c "Set :$1 $2" "$PLIST" 2>/dev/null \
-    || /usr/libexec/PlistBuddy -c "Add :$1 string $2" "$PLIST"
-}
+setp() { plutil -replace "$1" -string "$2" "$PLIST"; }
 setp CFBundleName "$NAME"
 setp CFBundleDisplayName "$NAME"
 setp CFBundleIdentifier com.agentpresence.app

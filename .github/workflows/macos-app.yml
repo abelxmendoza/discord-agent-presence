@@ -31,10 +31,13 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-        run: bash macos/build_app.sh dist
+        run: |
+          set -o pipefail
+          bash -x macos/build_app.sh dist 2>&1 | tee build.log
 
       - name: Smoke test the installer script
         run: |
+          exec > >(tee -a build.log) 2>&1
           set -x
           CORE="dist/Agent Presence.app/Contents/Resources/install_core.sh"
           test "$("$CORE" status)" = "not-installed"
@@ -50,6 +53,16 @@ jobs:
       - name: Install log
         if: always()
         run: cat ~/Library/Logs/agent-presence-install.log || true
+
+      - name: Report failure as an annotation
+        if: failure()
+        run: |
+          {
+            tail -n 40 build.log 2>/dev/null
+            echo "---- install log"
+            tail -n 40 ~/Library/Logs/agent-presence-install.log 2>/dev/null
+          } > tail.txt || true
+          echo "::error title=macos-app failed::$(sed 's/%/%25/g' tail.txt | awk 'BEGIN{ORS="%0A"} {print}')"
 
       - uses: actions/upload-artifact@v4
         with:
