@@ -75,6 +75,7 @@ git clone https://github.com/abelxmendoza/discord-agent-presence && ./discord-ag
 | `agent-presence run` | Runs in the foreground |
 | `agent-presence link` / `link <key>` / `link --off` | Shares one card across your computers |
 | `agent-presence web setup [--readme]` / `web preview` / `web off` | Publishes your status for a README card and website widget |
+| `agent-presence stats [--html]` | Your coding habits, private to this computer |
 | `agent-presence machines` | Shows this computer, your linked ones, and which one has the card |
 
 | | Linux | macOS | Windows |
@@ -165,6 +166,28 @@ computer showing the card. Linux reads keyboard/mouse idle time with
 `xprintidle` if installed (`sudo apt install xprintidle`); without it the card
 falls back to whichever Linux machine has the busiest agents.
 
+### Your coding habits (private)
+
+While it runs, it keeps a log of your habits on this computer only
+(`~/.local/state/ai-presence/habits/`, one small file per month): minutes
+coding per hour and day, sessions, projects, tools, models, machines, how many
+agents ran at once, test and build results, commits, tokens and agent time.
+Nothing in it is ever published.
+
+```
+$ agent-presence stats
+  streak        12 days (best 19)
+  today         3h 10m coding · 5h 40m of agent work · 6 commits · 1.2M tokens
+  7 days        31h coding · 52h of agent work · 38 commits
+  sessions      41 in 30 days · average 1h 5m · longest 4h 20m
+  peak time     around 10 PM · most on Tuesdays
+  most agents   5 working at once
+  tests         96 runs · 91% passed
+```
+
+`agent-presence stats --html` opens a private report in your browser with an
+hour-of-day heatmap and a 30-day chart.
+
 ### On your GitHub README and website
 
 Discord only has room for a couple of lines. The same status can go on your
@@ -201,10 +224,27 @@ Any website (a live panel; restyle it with `--ap-*` CSS variables):
 
 The [website](https://abelxmendoza.github.io/discord-agent-presence/#everywhere)
 writes these for you. `web preview` saves the card and data locally without
-publishing. File names stay off the web unless you set `web.show_files`; hidden
-projects stay hidden; set `web.show_tokens` to `false` to leave token counts
-out. When several computers are linked, only the one showing the Discord card
-publishes.
+publishing. When several computers are linked, only the one showing the
+Discord card publishes.
+
+**What's public, and what isn't.** The web version is stricter than Discord,
+because anyone can see it:
+
+- Only repos that are **public on GitHub** are named. Private ones show as
+  "a private project", with no branch, and aren't listed.
+- No file names (`web.show_files`), no token counts (`web.show_tokens`), and
+  OS shows its major version only (`macOS 15`); `web.show_machines: false`
+  drops machines entirely.
+- **No clock times.** It says "live" while you code, and otherwise the day you
+  last coded ("today", "yesterday"). The status commit is dated to the day too.
+- From your private habit log, only the highlights in `web.share` go out
+  (streak, best streak, hours this week rounded, commits this week and month,
+  days coded this month, top public project, tests passed). Delete any you
+  don't want.
+- `web.live: false` stops live status entirely and publishes highlights only,
+  so nobody can tell when you're at your computer.
+- `web setup` suggests a fine-grained token that can only write your profile
+  repo, rather than your GitHub CLI login, which can write to every repo.
 
 ### Images that change
 
@@ -239,7 +279,7 @@ Presence apps* on.
 | `hide_projects` | `[]` | Shown as "private project", with no git, CI or button |
 | `show_machine` | `true` | The computer / OS line, and which linked machines are in use |
 | `machine_name` | `""` | What to call this computer; blank = its model |
-| `web` | off | `enabled`, `repo`, `branch`, `name`, `show_tokens`, `show_files`, `every_seconds` for the README card and website widget |
+| `web` | off | `enabled`, `repo`, `branch`, `name`, `live`, `share`, `show_tokens`, `show_files`, `show_machines`, `every_seconds` for the README card and website widget |
 | `link_key` | `""` | Same key on each computer = one shared card (`agent-presence link`) |
 | `show_project`, `show_files`, `show_git`, `show_stats`, `show_streak`, `show_model`, `show_ci`, `show_milestones` | `true` | Turn each line on or off |
 | `github_button`, `promo_button`, `mood_verbs` | `true` | |

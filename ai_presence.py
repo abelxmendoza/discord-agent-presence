@@ -77,8 +77,14 @@ DEFAULT_CONFIG = {
     # Publish what you're doing to GitHub for a README card and a website
     # widget, with more detail than Discord shows. Set up with
     # `agent-presence web setup`.
+    # Private by default: only public GitHub repos are named, OS shows its
+    # major version, times are rounded to the day. `share` picks which
+    # highlights from your private habit log go on it.
     "web": {"enabled": False, "repo": "", "branch": "agent-presence-status", "name": "",
-            "show_tokens": True, "show_files": False, "every_seconds": 120, "token": ""},
+            "live": True, "show_tokens": False, "show_files": False, "show_machines": True,
+            "share": ["streak", "best_streak", "week_hours", "week_commits", "month_commits",
+                      "active_days", "top_project", "tests"],
+            "every_seconds": 120, "token": ""},
     # Big picture switches to <app>_failed / <app>_success after a test or
     # build run, for this long.
     "failed_mood_seconds": 900,
@@ -1669,8 +1675,11 @@ def machine_status(cfg, live):
     for tool, s in live.items():
         for a in s["agents"]:
             proj = a.get("project")
+            root = s["roots"].get(proj)
+            slug = github_slug(root) if root else None
             agents.append({"tool": tool, "status": a["status"], "action": a["action"],
                            "project": None if proj in hidden else proj,
+                           "public": bool(slug and github_public(slug)),
                            "model": a.get("model"), "mtime": a["mtime"],
                            "outcome": a.get("outcome")})
     agents.sort(key=lambda a: -a["mtime"])
@@ -1827,6 +1836,295 @@ def machine_lines(cfg, machines, switched=None):
     return lines
 
 
+# ----------------------------------------------------------- habits ----
+# A private, local log of your coding habits: one record per day, sampled
+# once a minute. It never leaves this computer; `agent-presence stats` reads
+# it, and the web card only gets the highlights you choose to share.
+
+HABITS_DIR = STATE_DIR / "habits"
+SESSION_GAP = 15  # minutes without activity that end a session
+WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+def _blank_day():
+    return {"active_minutes": 0, "agent_minutes": 0, "max_parallel": 0, "hours": [0] * 24,
+            "sessions": [], "tools": {}, "projects": {}, "machines": {}, "models": {},
+            "outcomes": {}, "commits": {}, "tokens": 0, "agent_seconds": 0, "seen": []}
+
+
+def load_habits(days=None):
+    """{"YYYY-MM-DD": record} for the last `days` days (all when None)."""
+    out = {}
+    if not HABITS_DIR.exists():
+        return out
+    cutoff = (date.today() - timedelta(days=days - 1)).isoformat() if days else ""
+    for f in sorted(HABITS_DIR.glob("*.json")):
+        if cutoff and f.stem < cutoff[:7]:
+            continue
+        try:
+            month = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        for day, rec in month.items():
+            if day >= cutoff:
+                out[day] = {**_blank_day(), **rec}
+    return out
+
+
+class Habits:
+    """Adds one minute of observations at a time to today's record."""
+
+    def __init__(self):
+        self.minute = None
+        self.month, self.data = None, {}
+
+    def _day(self, day):
+        month = day[:7]
+        if month != self.month:
+            self.month = month
+            try:
+                self.data = json.loads((HABITS_DIR / f"{month}.json").read_text())
+            except (OSError, ValueError):
+                self.data = {}
+        rec = self.data.setdefault(day, _blank_day())
+        for k, v in _blank_day().items():
+            rec.setdefault(k, v)
+        return rec
+
+    def record(self, cfg, live, machine_label=None, now=None):
+        now = now or time.time()
+        minute = int(now // 60)
+        if minute == self.minute:
+            return False
+        self.minute = minute
+        t = time.localtime(now)
+        rec = self._day(time.strftime("%Y-%m-%d", t))
+        busy = [(tool, a) for tool, s in live.items() for a in s["agents"] if a["status"] == "busy"]
+        focused = [tool for tool, s in live.items() if s["focused"]]
+        if focused or busy:
+            rec["active_minutes"] += 1
+            rec["hours"][t.tm_hour] += 1
+            if rec["sessions"] and minute - rec["sessions"][-1][1] <= SESSION_GAP:
+                rec["sessions"][-1][1] = minute
+            else:
+                rec["sessions"].append([minute, minute])
+            for tool in set(focused) | {tool for tool, _ in busy}:
+                rec["tools"][tool] = rec["tools"].get(tool, 0) + 1
+            projects = {a.get("project") for _, a in busy if a.get("project")}
+            for tool in focused:
+                if live[tool]["projects"]:
+                    projects.add(live[tool]["projects"][0])
+            for p in projects:
+                rec["projects"][p] = rec["projects"].get(p, 0) + 1
+            if machine_label:
+                rec["machines"][machine_label] = rec["machines"].get(machine_label, 0) + 1
+        rec["agent_minutes"] += len(busy)
+        rec["max_parallel"] = max(rec["max_parallel"], len(busy))
+        for _, a in busy:
+            if a.get("model"):
+                m = pretty_model(a["model"])
+                rec["models"][m] = rec["models"].get(m, 0) + 1
+        seen = set(rec["seen"])
+        for s in live.values():
+            for a in s["agents"]:
+                o = a.get("outcome")
+                if not o or o["t"] < _midnight():
+                    continue
+                key = f"{a['tool']}:{o['kind']}:{int(o['t'])}"
+                if key not in seen:
+                    seen.add(key)
+                    k = f"{o['kind']}_{'pass' if o['ok'] else 'fail'}"
+                    rec["outcomes"][k] = rec["outcomes"].get(k, 0) + 1
+        rec["seen"] = sorted(seen)[-300:]
+        stats = today_stats()
+        rec["tokens"] = max(rec["tokens"], sum(v[1] for v in stats.values()))
+        rec["agent_seconds"] = max(rec["agent_seconds"], int(sum(v[0] for v in stats.values())))
+        for s in live.values():
+            for p, root in s["roots"].items():
+                g = git_stats(root)
+                if g and g["commits_today"]:
+                    rec["commits"][p] = max(rec["commits"].get(p, 0), g["commits_today"])
+        try:
+            HABITS_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = HABITS_DIR / f"{self.month}.json.tmp"
+            tmp.write_text(json.dumps(self.data, separators=(",", ":")))
+            tmp.replace(HABITS_DIR / f"{self.month}.json")
+        except OSError as e:
+            log("habits: can't save:", e)
+        return True
+
+
+def _streaks(active_days):
+    """(current, best) runs of consecutive days."""
+    days = sorted(active_days)
+    best = run = 0
+    prev = None
+    for d in days:
+        cur = date.fromisoformat(d)
+        run = run + 1 if prev and cur - prev == timedelta(days=1) else 1
+        best = max(best, run)
+        prev = cur
+    current, d = 0, date.today()
+    if d.isoformat() not in active_days:
+        d -= timedelta(days=1)
+    while d.isoformat() in active_days:
+        current += 1
+        d -= timedelta(days=1)
+    return current, best
+
+
+def habit_summary(habits=None, today=None):
+    """Totals and patterns over today, the last 7 and 30 days, and all time."""
+    habits = load_habits() if habits is None else habits
+    today = today or date.today()
+
+    def window(n):
+        lo = (today - timedelta(days=n - 1)).isoformat()
+        return {d: r for d, r in habits.items() if lo <= d <= today.isoformat()}
+
+    def total(recs):
+        sessions = [b - a + 1 for r in recs.values() for a, b in r["sessions"]]
+        outcomes = {}
+        for r in recs.values():
+            for k, v in r["outcomes"].items():
+                outcomes[k] = outcomes.get(k, 0) + v
+        tests = outcomes.get("tests_pass", 0) + outcomes.get("tests_fail", 0)
+
+        def top(key, n=5):
+            agg = {}
+            for r in recs.values():
+                for k, v in r[key].items():
+                    agg[k] = agg.get(k, 0) + v
+            return sorted(agg.items(), key=lambda kv: -kv[1])[:n]
+        return {"days": sum(1 for r in recs.values() if r["active_minutes"] or r["commits"]),
+                "active_minutes": sum(r["active_minutes"] for r in recs.values()),
+                "agent_minutes": sum(r["agent_minutes"] for r in recs.values()),
+                "max_parallel": max([r["max_parallel"] for r in recs.values()] or [0]),
+                "commits": sum(sum(r["commits"].values()) for r in recs.values()),
+                "tokens": sum(r["tokens"] for r in recs.values()),
+                "sessions": len(sessions),
+                "avg_session": round(sum(sessions) / len(sessions)) if sessions else 0,
+                "longest_session": max(sessions or [0]),
+                "outcomes": outcomes,
+                "tests_run": tests,
+                "tests_pass_rate": round(100 * outcomes.get("tests_pass", 0) / tests) if tests else None,
+                "projects": top("projects"), "tools": top("tools"), "models": top("models", 3),
+                "machines": top("machines", 4)}
+
+    active = {d for d, r in habits.items() if r["active_minutes"] or r["commits"]}
+    try:
+        active |= set(json.loads((STATE_DIR / "days.json").read_text()))
+    except (OSError, ValueError):
+        pass
+    current, best = _streaks(active)
+    hours, weekdays = [0] * 24, [0] * 7
+    for d, r in window(30).items():
+        for h, m in enumerate(r["hours"]):
+            hours[h] += m
+        weekdays[date.fromisoformat(d).weekday()] += r["active_minutes"]
+    return {"today": total(window(1)), "week": total(window(7)), "month": total(window(30)),
+            "all": total(habits), "streak": current, "best_streak": best,
+            "first_day": min(habits) if habits else None,
+            "hours": hours, "weekdays": weekdays,
+            "peak_hour": max(range(24), key=lambda h: hours[h]) if any(hours) else None,
+            "peak_weekday": WEEKDAYS[max(range(7), key=lambda d: weekdays[d])] if any(weekdays) else None,
+            "daily": [(d, habits[d]["active_minutes"], sum(habits[d]["commits"].values()))
+                      for d in sorted(window(30))]}
+
+
+def _hours(minutes):
+    return human_duration(minutes * 60) if minutes else "0m"
+
+
+def _clock(h):
+    return f"{(h % 12) or 12} {'AM' if h < 12 else 'PM'}"
+
+
+def cmd_stats(html=False):
+    s = habit_summary()
+    if not s["first_day"]:
+        print("No habits recorded yet. They build up while agent-presence runs.")
+        return
+    t, w, m, a = s["today"], s["week"], s["month"], s["all"]
+    print(f"Coding habits since {s['first_day']} (private: stored only on this computer)\n")
+    print(f"  streak        {plural(s['streak'], 'day')} (best {s['best_streak']})")
+    for label, x in (("today", t), ("7 days", w), ("30 days", m), ("all time", a)):
+        bits = [f"{_hours(x['active_minutes'])} coding", f"{_hours(x['agent_minutes'])} of agent work",
+                plural(x["commits"], "commit")]
+        if x["tokens"]:
+            bits.append(f"{human_tokens(x['tokens'])} tokens")
+        print(f"  {label:<13} " + " · ".join(bits))
+    print(f"\n  sessions      {m['sessions']} in 30 days · average {_hours(m['avg_session'])}"
+          f" · longest {_hours(m['longest_session'])}")
+    if s["peak_hour"] is not None:
+        print(f"  peak time     around {_clock(s['peak_hour'])} · most on {s['peak_weekday']}s")
+    if m["max_parallel"]:
+        print(f"  most agents   {m['max_parallel']} working at once")
+    if m["tests_run"]:
+        print(f"  tests         {m['tests_run']} runs · {m['tests_pass_rate']}% passed")
+    for key, label in (("projects", "projects"), ("tools", "tools"), ("models", "models"), ("machines", "machines")):
+        if m[key]:
+            print(f"  {label:<13} " + " · ".join(
+                f"{TOOL_NAMES.get(k, k).split(' ·')[0] if key == 'tools' else k} {_hours(v)}" for k, v in m[key]))
+    if html:
+        path = STATE_DIR / "habits.html"
+        path.write_text(habits_html(s), encoding="utf-8")
+        import webbrowser
+        webbrowser.open(path.as_uri())
+        print(f"\nOpened {path}")
+
+
+def habits_html(s):
+    """A private one-page report of your habits (opened locally, never published)."""
+    m = s["month"]
+    peak = max(s["hours"]) or 1
+    cells = "".join(f'<div class="h" style="--a:{v / peak:.2f}" title="{_clock(h)}: {_hours(v)}"></div>'
+                    for h, v in enumerate(s["hours"]))
+    top = max([d[1] for d in s["daily"]] or [1]) or 1
+    bars = "".join(f'<div class="b" style="--v:{v / top:.2f}" title="{d}: {_hours(v)}, {c} commits"></div>'
+                   for d, v, c in s["daily"])
+
+    def rows(items, tool=False):
+        return "".join(f"<tr><td>{_x(TOOL_NAMES.get(k, k).split(' ·')[0] if tool else k)}</td>"
+                       f"<td>{_hours(v)}</td></tr>" for k, v in items) or "<tr><td>—</td></tr>"
+
+    def card(v, label):
+        return f'<div class="k"><b>{_x(v)}</b><span>{_x(label)}</span></div>'
+    kpis = "".join([
+        card(f"{s['streak']} days", f"streak (best {s['best_streak']})"),
+        card(_hours(s["week"]["active_minutes"]), "coding, last 7 days"),
+        card(_hours(m["active_minutes"]), "coding, last 30 days"),
+        card(m["commits"], "commits, 30 days"),
+        card(_hours(m["avg_session"]), "average session"),
+        card(_hours(m["longest_session"]), "longest session"),
+        card(m["max_parallel"], "most agents at once"),
+        card(f"{m['tests_pass_rate']}%" if m["tests_pass_rate"] is not None else "—", "tests passed")])
+    return f"""<!doctype html><meta charset="utf-8"><title>My coding habits</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{{margin:0;background:#0b0d12;color:#e6e8ee;font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}}
+main{{max-width:900px;margin:0 auto;padding:32px 16px}}h1{{margin:0 0 4px}}p{{color:#9aa4bd;margin:0 0 24px}}
+h2{{font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:#fb923c;margin:28px 0 10px}}
+.ks{{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}}
+.k{{background:#121826;border:1px solid #232c44;border-radius:12px;padding:12px}}.k b{{display:block;font-size:22px}}.k span{{color:#9aa4bd;font-size:13px}}
+.hs{{display:grid;grid-template-columns:repeat(24,1fr);gap:3px}}.h{{aspect-ratio:1;border-radius:4px;background:rgba(45,212,191,calc(.08 + var(--a)*.92))}}
+.hl{{display:flex;justify-content:space-between;color:#9aa4bd;font-size:12px;margin-top:4px}}
+.bs{{display:flex;align-items:flex-end;gap:3px;height:120px}}.b{{flex:1;height:calc(var(--v)*100%);min-height:2px;background:linear-gradient(#f97316,#db2777);border-radius:3px 3px 0 0}}
+.cols{{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}}
+table{{width:100%;border-collapse:collapse}}td{{padding:6px 0;border-bottom:1px solid #232c44}}td:last-child{{text-align:right;color:#9aa4bd}}
+</style><main>
+<h1>My coding habits</h1><p>Private report from agent-presence, kept only on this computer. Since {_x(s['first_day'])}.</p>
+<div class="ks">{kpis}</div>
+<h2>When I code (last 30 days)</h2><div class="hs">{cells}</div>
+<div class="hl"><span>12 AM</span><span>6 AM</span><span>12 PM</span><span>6 PM</span><span>11 PM</span></div>
+<h2>Each day (last 30 days)</h2><div class="bs">{bars}</div>
+<div class="cols"><div><h2>Projects</h2><table>{rows(m['projects'])}</table></div>
+<div><h2>Tools</h2><table>{rows(m['tools'], True)}</table></div>
+<div><h2>Models</h2><table>{rows(m['models'])}</table></div>
+<div><h2>Machines</h2><table>{rows(m['machines'])}</table></div></div>
+</main>"""
+
+
 # ------------------------------------------------------------- web ----
 # The same activity, with more detail than Discord has room for, published
 # to your GitHub so a README card and your website can show it. Two files go
@@ -1841,7 +2139,7 @@ WEB_BRANCH = "agent-presence-status"
 WEB_RAW = "https://raw.githubusercontent.com/{repo}/{branch}/{file}"
 WEB_STATE = STATE_DIR / "web.json"
 STATE_WORDS = {"vibe-coding": "vibe coding", "coding": "coding", "idle": "not coding right now",
-               "offline": "offline"}
+               "offline": "offline", "summary": "building"}
 
 
 def web_cfg(cfg):
@@ -1885,8 +2183,11 @@ def publish_files(token, repo, branch, files):
     tree = github_call(token, "POST", f"/repos/{repo}/git/trees", {"tree": [
         {"path": name, "mode": "100644", "type": "blob", "content": content}
         for name, content in files.items()]})
+    day = time.strftime("%Y-%m-%dT00:00:00Z", time.gmtime())  # the day, not the minute
+    who = {"name": "agent-presence", "email": "agent-presence@users.noreply.github.com", "date": day}
     commit = github_call(token, "POST", f"/repos/{repo}/git/commits", {
-        "message": "agent-presence status", "tree": tree["sha"], "parents": []})
+        "message": "agent-presence status", "tree": tree["sha"], "parents": [],
+        "author": who, "committer": who})
     try:
         github_call(token, "PATCH", f"/repos/{repo}/git/refs/heads/{branch}",
                     {"sha": commit["sha"], "force": True})
@@ -1902,64 +2203,135 @@ def strip_file(action):
     return re.sub(r"\s+\S*\.[A-Za-z0-9]{1,8}$", "", action)
 
 
-def web_status(cfg, live, machines=None, streak=0, state=None):
-    """Everything the README card and website widget show, as a dict."""
-    w, now = web_cfg(cfg), time.time()
+def is_public_project(s, name, agent=None):
+    """Only repos that are public on GitHub get named on the web."""
+    root = s["roots"].get(name) if s else None
+    slug = github_slug(root) if root else None
+    if slug:
+        return github_public(slug)
+    return bool(agent and agent.get("public"))
+
+
+def _day_word(ts):
+    """"today" / "yesterday" / "Oct 20": never the exact time on the web."""
+    if not ts:
+        return None
+    d = date.fromtimestamp(ts)
+    if d == date.today():
+        return "today"
+    if d == date.today() - timedelta(days=1):
+        return "yesterday"
+    return d.strftime("%b %d").replace(" 0", " ")
+
+
+def web_highlights(cfg, s=None):
+    """The shareable bits of the private habit log, as [{"value", "label"}]."""
+    share = set(web_cfg(cfg)["share"])
+    h = habit_summary() if s is None else s
+    out = []
+
+    def add(key, value, label):
+        if key in share and value:
+            out.append({"key": key, "value": value, "label": label})
+    add("streak", f"{h['streak']} days" if h["streak"] >= 2 else None, "coding streak")
+    add("best_streak", f"{h['best_streak']} days" if h["best_streak"] >= 3 else None, "best streak")
+    wk = h["week"]["active_minutes"]
+    add("week_hours", f"{round(wk / 60)}h" if wk >= 60 else None, "coding this week")
+    add("week_commits", h["week"]["commits"], "commits this week")
+    add("month_commits", h["month"]["commits"], "commits, 30 days")
+    add("active_days", f"{h['month']['days']}/30" if h["month"]["days"] >= 3 else None, "days coded")
+    m = h["month"]
+    if m["tests_run"] >= 5:
+        add("tests", f"{m['outcomes'].get('tests_pass', 0)}", "tests passed, 30d")
+    if web_cfg(cfg)["show_tokens"]:
+        add("tokens", human_tokens(h["week"]["tokens"]) if h["week"]["tokens"] else None, "tokens this week")
+    return out
+
+
+def web_status(cfg, live, machines=None, streak=0, state=None, habits=None):
+    """What the README card and website widget show. Built to be public:
+    private repos are unnamed, OS is major-version only, and times are
+    rounded to the day."""
+    w = web_cfg(cfg)
     hidden = set(cfg["hide_projects"])
     try:
         saved = json.loads(WEB_STATE.read_text())
     except (OSError, ValueError):
         saved = {}
-    out = {"v": 1, "updated": int(now), "name": w["name"], "tool": None, "tools": [],
+    h = habit_summary() if habits is None else habits
+    top = next(((p, v) for p, v in h["week"]["projects"]), None)
+    out = {"v": 2, "updated": int(time.time()), "name": w["name"], "tool": None, "tools": [],
            "verb": None, "title": None, "headline": None, "mood": "idle", "image": None,
-           "since": None, "agents": [], "projects": [], "machines": machines or [],
-           "today": {}, "streak": streak, "model": None, "lines": [],
-           "last_active": saved.get("last_active"),
-           "landing": LANDING_URL}
-    if not live or state == "offline":
-        out["state"] = state or "idle"
+           "agents": [], "projects": [], "machines": [], "today": {}, "streak": h["streak"] or streak,
+           "model": None, "last_active": _day_word(saved.get("last_active")),
+           "highlights": web_highlights(cfg, h), "landing": LANDING_URL}
+    if top and "top_project" in w["share"] and top[0] in saved.get("public_projects", []):
+        out["highlights"].append({"key": "top_project", "value": top[0], "label": "top project, 7 days"})
+    if not live or state == "offline" or not w["live"]:
+        out["state"] = state or ("idle" if w["live"] else "summary")
+        out["updated"] = int(_midnight())  # no exact "went offline at" time
         return out
     primary, s = merge_states(live)
-    lines = card_lines(cfg, primary, s, streak, machines)[0]
     busy = [a for a in s["agents"] if a["status"] == "busy"]
     out["state"] = "vibe-coding" if busy else "coding" if s["focused"] or s["agents"] else "idle"
-    out["last_active"] = int(now) if out["state"] != "idle" else out["last_active"]
+    if out["state"] != "idle":
+        saved["last_active"] = time.time()
+        out["last_active"] = "now"
+    public = {p: p not in hidden and is_public_project(
+        s, p, next((a for a in s["agents"] if a.get("project") == p), None)) for p in s["projects"]}
+
+    def name(p, agent=None):
+        if not p or p in hidden:
+            return "a private project" if p else None
+        ok = public.get(p)
+        if ok is None:
+            ok = is_public_project(s, p, agent)
+        return p if ok else "a private project"
     m = mood(s, cfg)
+    n_busy, n_wait = len(busy), len(s["agents"]) - len(busy)
+    headline = (f"⚡ {plural(n_busy, 'agent')} working" if n_busy else
+                f"⏳ {plural(n_wait, 'agent')} waiting" if n_wait else "● hands on keyboard")
+    if n_busy and n_wait:
+        headline += f" · {n_wait} waiting"
     out.update(tool=primary, tools=[{"id": t, "name": TOOL_NAMES[t].split(" ·")[0]} for t in s["tools"]],
                verb="Watching" if busy and not s["focused"] else "Playing",
                title="Vibe Coding" if pick_name(cfg, s, 2) else "Coding", mood=m,
                image=image(cfg, f"{primary}_{m}", f"{primary}_{MOOD_FALLBACK.get(m, m)}", primary),
-               since=int(s["running_since"]),
-               headline=lines[0]["text"] if lines else None,
-               lines=[ln["text"] for ln in lines])
-    for a in sorted(s["agents"], key=lambda a: (a["status"] != "busy", -a["mtime"]))[:10]:
-        proj = a.get("project")
+               headline=headline)
+    for a in sorted(s["agents"], key=lambda a: (a["status"] != "busy", -a["mtime"]))[:8]:
         out["agents"].append({
-            "tool": a["tool"], "tool_name": TOOL_NAMES[a["tool"]].split(" ·")[0],
-            "status": a["status"],
+            "tool": a["tool"], "tool_name": TOOL_NAMES[a["tool"]].split(" ·")[0], "status": a["status"],
             "action": a["action"] if w["show_files"] else strip_file(a["action"]),
-            "project": None if proj in hidden else proj, "model": pretty_model(a["model"]) if a.get("model") else None,
-            "machine": a.get("machine")})
+            "project": name(a.get("project"), a),
+            "model": pretty_model(a["model"]) if a.get("model") else None})
     models = [a["model"] for a in s["agents"] if a.get("model")]
     out["model"] = pretty_model(max(set(models), key=models.count)) if models else None
     for p in s["projects"][:6]:
-        if p in hidden:
-            continue
+        if not public.get(p):
+            continue  # private repos aren't listed at all
         root = s["roots"].get(p)
         g = git_stats(root) if root else None
         slug = github_slug(root) if root else None
-        public = bool(slug and github_public(slug))
         out["projects"].append({
             "name": p, "branch": g["branch"] if g else None,
             "added": g["added"] if g else 0, "removed": g["removed"] if g else 0,
             "commits_today": g["commits_today"] if g else 0,
-            "url": f"https://github.com/{slug}" if public else None,
-            "ci": ci_status(slug, g["branch"]) if public and g and g["branch"] else None})
+            "url": f"https://github.com/{slug}" if slug else None,
+            "ci": ci_status(slug, g["branch"]) if slug and g and g["branch"] else None})
+    saved["public_projects"] = sorted(set(saved.get("public_projects", [])) | {p for p, ok in public.items() if ok})[-50:]
+    if w["show_machines"]:
+        out["machines"] = [{"label": x["label"], "icon": x["icon"], "os": x["os"], "agents": x["agents"]}
+                           for x in machines or []]
     stats = today_stats()
-    secs = sum(v[0] for v in stats.values())
-    out["today"] = {"agent_seconds": int(secs), "commits": sum(p["commits_today"] for p in out["projects"])}
+    out["today"] = {"agent_seconds": int(sum(v[0] for v in stats.values())),
+                    "commits": sum(sum(g["commits_today"] for g in [git_stats(r)] if g)
+                                   for p, r in s["roots"].items() if p not in hidden)}
     if w["show_tokens"]:
         out["today"]["tokens"] = sum(v[1] for v in stats.values())
+    try:
+        WEB_STATE.write_text(json.dumps(saved))
+    except OSError:
+        pass
     return out
 
 
@@ -1979,71 +2351,63 @@ def _when(ts):
 
 
 def render_svg(st):
-    """A README card: dark, 480 px wide, height fits the content."""
+    """A README card: dark, 480 px wide, height fits the content. No clock
+    times on it: just live, or the day you last coded."""
     W, pad, lh = 480, 20, 22
     rows = []  # (kind, text)
-    name = st.get("name") or "I'm"
     live = st["state"] in ("vibe-coding", "coding")
-    head = f"{name} {'is' if st.get('name') else ''} {STATE_WORDS[st['state']]}".replace("  ", " ")
-    if live and st.get("title"):
-        sub = " · ".join(filter(None, [", ".join(t["name"] for t in st["tools"][:4]),
-                                       st.get("model")]))
+    who = st.get("name")
+    head = f"{who} is {STATE_WORDS[st['state']]}" if who else STATE_WORDS[st["state"]].capitalize()
+    if live:
+        sub = " · ".join(filter(None, [st.get("title") and f"{st['verb']} {st['title']}",
+                                       ", ".join(t["name"] for t in st["tools"][:3]), st.get("model")]))
     elif st.get("last_active"):
-        sub = f"last coding {_when(st['last_active'])}"
+        sub = f"last coding {st['last_active']}"
     else:
         sub = "Agent Presence"
     if live:
         if st.get("headline"):
             rows.append(("big", st["headline"]))
         for a in [a for a in st["agents"] if a["status"] == "busy"][:3]:
-            where = " · ".join(filter(None, [a.get("project"), a.get("machine")]))
-            rows.append(("row", f"{a['action']}" + (f" · {where}" if where else "")))
-        for p in st["projects"][:3]:
+            rows.append(("row", a["action"] + (f" · {a['project']}" if a.get("project") else "")))
+        for p in st["projects"][:2]:
             bits = [f"📁 {p['name']}"]
             if p.get("branch"):
                 bits.append(f"🌿 {p['branch']}")
             if p.get("added") or p.get("removed"):
                 bits.append(f"+{p['added']} −{p['removed']}")
             rows.append(("row", " · ".join(bits)))
-        if len(st["machines"]) > 1:
-            rows.append(("row", " · ".join(
-                f"{m['icon']} {m['label']}" + (f" ({m['agents']})" if m["agents"] else "")
-                + ("" if m["in_use"] or m["agents"] else " 💤") for m in st["machines"])))
-        elif st["machines"]:
-            m = st["machines"][0]
-            rows.append(("row", f"{m['icon']} {m['label']} · {m['os']}"))
-    t = st.get("today") or {}
-    bits = []
-    if t.get("agent_seconds", 0) >= 60:
-        bits.append(f"⏱ {human_duration(t['agent_seconds'])} of agents")
-    if t.get("tokens"):
-        bits.append(f"💸 {human_tokens(t['tokens'])} tokens")
-    if t.get("commits"):
-        bits.append(f"📦 {plural(t['commits'], 'commit')}")
-    if st.get("streak", 0) >= 2:
-        bits.append(f"🔥 {st['streak']} days")
-    if bits:
-        rows.append(("dim", "today " + " · ".join(bits)))
-    H = pad + 50 + len(rows) * lh + 34
-    dot = {"vibe-coding": "#23a55a", "coding": "#23a55a", "idle": "#f0b232", "offline": "#80848e"}[st["state"]]
+        if st["machines"]:
+            rows.append(("row", " · ".join(f"{m['icon']} {m['label']} ({m['os']})" for m in st["machines"])))
+    hl = [h for h in st.get("highlights") or [] if h["key"] != "top_project"][:6]
+    tile_rows = (len(hl) + 2) // 3
+    tw, th, gap = (W - 2 * pad - 16) / 3, 46, 8
+    H = pad + 50 + len(rows) * lh + (tile_rows * (th + gap) + 12 if hl else 0) + 34
+    dot = {"vibe-coding": "#23a55a", "coding": "#23a55a", "idle": "#f0b232"}.get(st["state"], "#80848e")
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" '
            f'role="img" aria-label="{_x(head)}">',
            '<style>text{font-family:"Segoe UI",Ubuntu,"Helvetica Neue",Arial,sans-serif;fill:#dbdee1}'
            '.h{font-size:17px;font-weight:700;fill:#f2f3f5}.s{font-size:12.5px;fill:#949ba4}'
-           '.big{font-size:14px;font-weight:600;fill:#f2f3f5}.row{font-size:13.5px}.dim{font-size:12.5px;fill:#949ba4}'
-           '.f{font-size:11px;fill:#6d6f78}@keyframes p{50%{opacity:.35}}.live{animation:p 2s ease-in-out infinite}</style>',
+           '.big{font-size:14px;font-weight:600;fill:#f2f3f5}.row{font-size:13.5px}.dim{font-size:12.5px;fill:#b5bac1}'
+           '.f{font-size:11px;fill:#6d6f78}.v{font-size:15px;font-weight:700;fill:#f2f3f5}.l{font-size:11px;fill:#949ba4}@keyframes p{50%{opacity:.35}}.live{animation:p 2s ease-in-out infinite}</style>',
            f'<rect x=".5" y=".5" width="{W - 1}" height="{H - 1}" rx="12" fill="#111214" stroke="#2b2d31"/>',
            f'<rect x="1" y="1" width="{W - 2}" height="4" rx="2" fill="url(#g)"/>',
            '<defs><linearGradient id="g" x1="0" x2="1"><stop offset="0" stop-color="#f97316"/>'
            '<stop offset=".5" stop-color="#db2777"/><stop offset="1" stop-color="#14b8a6"/></linearGradient></defs>',
            f'<circle cx="{pad + 6}" cy="{pad + 12}" r="6" fill="{dot}"' + (' class="live"' if live else "") + "/>",
            f'<text class="h" x="{pad + 20}" y="{pad + 18}">{_x(head)}</text>',
-           f'<text class="s" x="{pad + 20}" y="{pad + 38}">{_x(sub[:70])}</text>']
+           f'<text class="s" x="{pad + 20}" y="{pad + 38}">{_x(clip(sub, 70))}</text>']
     y = pad + 50
     for kind, text in rows:
         y += lh
         out.append(f'<text class="{kind}" x="{pad}" y="{y}">{_x(clip(text, 62))}</text>')
-    out.append(f'<text class="f" x="{pad}" y="{H - 14}">updated {_x(_when(st["updated"]))}</text>')
+    y += 14 if rows else 4
+    for i, h in enumerate(hl):
+        x, ty = pad + (i % 3) * (tw + gap), y + (i // 3) * (th + gap)
+        out.append(f'<rect x="{x:.1f}" y="{ty}" width="{tw:.1f}" height="{th}" rx="8" fill="#1a1b1e" stroke="#2b2d31"/>'
+                   f'<text class="v" x="{x + 10:.1f}" y="{ty + 21}">{_x(clip(str(h["value"]), 14))}</text>'
+                   f'<text class="l" x="{x + 10:.1f}" y="{ty + 37}">{_x(clip(h["label"], 22))}</text>')
+    out.append(f'<text class="f" x="{pad}" y="{H - 14}">{"live" if live else "updates while I code"}</text>')
     out.append(f'<text class="f" x="{W - pad}" y="{H - 14}" text-anchor="end">🤖 agent-presence</text>')
     out.append("</svg>")
     return "\n".join(out)
@@ -2052,8 +2416,8 @@ def render_svg(st):
 def _web_signature(st):
     """What counts as a change worth publishing early (not the clock or counters)."""
     return json.dumps([st["state"], st.get("headline"), [(a["action"], a.get("project")) for a in st["agents"]],
-                       [p["name"] for p in st["projects"]],
-                       [(m["label"], m["in_use"], m["agents"]) for m in st["machines"]]])
+                       [p["name"] for p in st["projects"]], [(m["label"], m["agents"]) for m in st["machines"]],
+                       st.get("highlights")])
 
 
 class WebPublisher:
@@ -2076,8 +2440,6 @@ class WebPublisher:
             publish_files(token, self.repo, self.branch,
                           {"status.json": json.dumps(st, ensure_ascii=False, indent=1) + "\n",
                            "status.svg": render_svg(st) + "\n"})
-            if st.get("last_active"):
-                WEB_STATE.write_text(json.dumps({"last_active": st["last_active"]}))
             return True
         except Exception as e:
             log("web: publish failed:", repr(e))
@@ -2347,11 +2709,16 @@ leader_is_me = {}
 
 def _loop(cfg, conns, link, web):
     leader, switched_at, switched_from = None, 0, None
+    habits = Habits()
     while True:
         tick = int(time.time() // cfg["rotate_seconds"])
         try:
             live = snapshot(cfg)
             me = machine_status(cfg, live)
+            try:  # this computer's own activity only, before other machines' is merged in
+                habits.record(cfg, live, me["name"] or me["model"])
+            except Exception as e:
+                log("habits:", repr(e))
             peers = []
             if link:
                 link.send(me)
@@ -2692,6 +3059,15 @@ def cmd_web(action, repo=None, name=None, token=None, readme=False, yes=False):
     # setup
     if token:
         cfg["web"] = {**w, "token": token}
+    elif not (os.environ.get("AGENT_PRESENCE_TOKEN") or w.get("token")) and find_gh():
+        print("Safer option: a fine-grained token that can only write your profile repo.\n"
+              "  1. https://github.com/settings/personal-access-tokens/new\n"
+              "  2. Repository access: only <you>/<you>. Permissions: Contents → Read and write.\n"
+              "  3. agent-presence web setup --token <token>\n"
+              "Your GitHub CLI login works too, but it can write to all your repos, and this\n"
+              "runs in the background all day.")
+        if input("Use your GitHub CLI login anyway? [y/N] ").strip().lower() not in ("y", "yes"):
+            return
     tok = github_token(cfg)
     if not tok:
         sys.exit("No GitHub login found. Either install the GitHub CLI and run `gh auth login`,\n"
@@ -2798,6 +3174,8 @@ def cli():
     lp.add_argument("key", nargs="?", help="the key from your first computer")
     lp.add_argument("--off", action="store_true", help="stop sharing")
     sub.add_parser("machines", help="show this computer and your linked ones")
+    stp = sub.add_parser("stats", help="your coding habits (private, from this computer)")
+    stp.add_argument("--html", action="store_true", help="open a private report in your browser")
     wp = sub.add_parser("web", help="show your activity on your GitHub README and website")
     wp.add_argument("action", nargs="?", default="setup", choices=["setup", "status", "preview", "off"])
     wp.add_argument("--repo", help="owner/name to publish to (default: your profile repo)")
@@ -2810,6 +3188,8 @@ def cli():
         return cmd_setup(args.dry_run, args.quiet)
     if args.cmd == "link":
         return cmd_link(args.key, args.off)
+    if args.cmd == "stats":
+        return cmd_stats(args.html)
     if args.cmd == "web":
         return cmd_web(args.action, args.repo, args.name, args.token, args.readme, args.yes)
     {"detect": cmd_detect, "uninstall": cmd_uninstall, "machines": cmd_machines,

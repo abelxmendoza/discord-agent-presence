@@ -423,7 +423,7 @@
     <div class="sec-head">
       <div class="kicker">README &amp; website</div>
       <h2>Show it beyond Discord</h2>
-      <p>Put a live card on your GitHub profile and a full status panel on your portfolio, so people and recruiters see what you're building right now. It shows more than Discord has room for: every agent and what it's doing, your projects with branches and CI, which computers you're on, and today's totals.</p>
+      <p>Put a live card on your GitHub profile and a status panel on your portfolio, so people and recruiters see what you're building. It shows more than Discord has room for, like every agent and what it's doing, your public projects with branches and CI, and highlights like your streak and commits this month, while the details of your habits stay private on your computer.</p>
     </div>
     <div class="ev">
       <div>
@@ -439,7 +439,8 @@
               </div>
               <div class="snip"><pre id="ap-snip"></pre><button class="copy2" type="button">Copy</button></div>
             </div></div></div>
-          <div class="step"><div><h3>That's it</h3><p>Your computer updates the card every couple of minutes while you work and marks you offline when you log off. It publishes to a side branch of your repo, one commit that's replaced each time, so it never touches your contribution graph.</p></div></div>
+          <div class="step"><div><h3>Private by default</h3><p>Only repos that are public on GitHub are named; everything else shows as "a private project". No file names, no exact OS versions, no clock times: just "live" or the day you last coded. Your full habit history stays on your computer (<code>agent-presence stats</code>), and only the highlights you pick, like your streak or commits this month, get shared.</p></div></div>
+          <div class="step"><div><h3>That's it</h3><p>It updates while you work and goes quiet when you log off. Everything lives on a side branch of your repo as one commit that's replaced each time, so it never touches your contribution graph.</p></div></div>
         </div>
       </div>
       <div class="previewbox">
@@ -506,22 +507,26 @@
     const site = "https://abelxmendoza.github.io/discord-agent-presence/";
     let kind = "md";
     const demo = {
-      v: 1, updated: Math.floor(Date.now() / 1000) - 40, name: "Alex", state: "vibe-coding",
-      verb: "Watching", title: "Vibe Coding", model: "Opus 5.5", since: Math.floor(Date.now() / 1000) - 5530,
-      image: "assets/claude_crew.webp", headline: "⚡ 4 agents cooking · Claude 2 · Codex 2",
+      v: 2, updated: Math.floor(Date.now() / 1000) - 40, name: "Alex", state: "vibe-coding", last_active: "now",
+      verb: "Watching", title: "Vibe Coding", model: "Opus 5.5",
+      image: "assets/claude_crew.webp", headline: "⚡ 3 agents working · 1 waiting",
       tools: [{ name: "Claude" }, { name: "Codex" }, { name: "Cursor" }],
       agents: [
         { tool_name: "Claude", status: "busy", action: "🧪 running tests", project: "px4-autonomous-mission", model: "Opus 5.5" },
-        { tool_name: "Codex", status: "busy", action: "🛸 running the sim", project: "px4-autonomous-mission", machine: "Alienware Aurora R16" },
-        { tool_name: "Claude", status: "busy", action: "✍ editing", project: "omega-1" },
-        { tool_name: "Codex", status: "waiting", action: "⏳ waiting for me", project: "omega-1", machine: "Alienware Aurora R16" }],
+        { tool_name: "Codex", status: "busy", action: "🛸 running the sim", project: "px4-autonomous-mission" },
+        { tool_name: "Claude", status: "busy", action: "✍ editing", project: "a private project" },
+        { tool_name: "Codex", status: "waiting", action: "⏳ waiting for me", project: "omega-1" }],
       projects: [
         { name: "px4-autonomous-mission", branch: "feat/sim-asset-pipeline", added: 159, removed: 18, commits_today: 4, ci: "✅ CI green" },
         { name: "omega-1", branch: "main", added: 0, removed: 0, commits_today: 2 }],
-      machines: [
-        { icon: "💻", label: "MacBook Pro", os_full: "macOS Sequoia 15.2", agents: 2, busy: 2, in_use: true },
-        { icon: "🖥", label: "Alienware Aurora R16", os_full: "Ubuntu 24.04.1 LTS", agents: 2, busy: 1, in_use: false }],
-      today: { agent_seconds: 12660, tokens: 3600000, commits: 6 }, streak: 6, landing: site
+      machines: [{ icon: "💻", label: "MacBook Pro", os: "macOS 15", agents: 2 },
+                 { icon: "🖥", label: "Alienware Aurora R16", os: "Ubuntu 24.04", agents: 2 }],
+      today: { agent_seconds: 12660, commits: 6 },
+      highlights: [{ key: "streak", value: "12 days", label: "coding streak" },
+                   { key: "week_hours", value: "31h", label: "coding this week" },
+                   { key: "month_commits", value: 142, label: "commits in 30 days" },
+                   { key: "tests", value: "96", label: "test runs passed this month" }],
+      streak: 12, landing: site
     };
     const root = box.attachShadow({ mode: "open" });
     AgentPresence.render(root, demo);

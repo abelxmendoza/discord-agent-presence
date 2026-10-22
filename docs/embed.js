@@ -88,20 +88,21 @@
   function render(root, st, hide) {
     hide = hide || {};
     var now = Date.now() / 1000;
-    var stale = now - st.updated > STALE;
-    var state = stale && st.state !== "offline" ? "offline" : st.state;
+    var live0 = st.state === "vibe-coding" || st.state === "coding";
+    var state = live0 && now - st.updated > STALE ? "offline" : st.state;  // stopped updating
     var live = state === "vibe-coding" || state === "coding";
     var words = { "vibe-coding": ["is vibe coding", "Vibe coding"], coding: ["is coding", "Coding"],
-                  idle: ["isn't coding right now", "Not coding right now"], offline: ["is offline", "Offline"] };
+                  idle: ["isn't coding right now", "Not coding right now"], offline: ["is offline", "Offline"],
+                  summary: ["is building", "Building"] };
     var head = st.name ? esc(st.name) + " " + words[state][0] : words[state][1];
     var sub;
     if (live) {
       var tools = (st.tools || []).map(function (t) { return t.name; }).join(", ");
       sub = "<b>" + esc(st.verb || "Playing") + " " + esc(st.title || "Coding") + "</b>" +
-            (tools ? " · " + esc(tools) : "") + (st.model ? " · " + esc(st.model) : "") +
-            (st.since ? " · <span data-since='" + st.since + "'>" + dur(now - st.since) + "</span>" : "");
+            (tools ? " · " + esc(tools) : "") + (st.model ? " · " + esc(st.model) : "");
     } else {
-      sub = st.last_active ? "Last coding " + esc(ago(st.last_active)) : "Agent Presence";
+      var la = typeof st.last_active === "number" ? ago(st.last_active) : st.last_active;
+      sub = la && la !== "now" ? "Last coding " + esc(la) : "Agent Presence";
     }
     var html = "<div class='c'><div class='bar'></div><div class='top'>";
     if (st.image) html += "<div class='pic'><img alt='' src='" + esc(st.image) + "'><span class='dot " +
@@ -133,23 +134,26 @@
     if (live && st.machines && st.machines.length && !hide.machines) {
       html += "<div class='sec'><div class='lbl'>" + (st.machines.length > 1 ? st.machines.length + " machines" : "Machine") + "</div><ul>";
       st.machines.forEach(function (m) {
-        var what = m.agents ? m.agents + " agent" + (m.agents > 1 ? "s" : "") + (m.busy ? ", " + m.busy + " working" : "")
-                 : m.in_use ? "in use" : "idle";
+        var what = m.agents ? m.agents + " agent" + (m.agents > 1 ? "s" : "") : "online";
         html += "<li>" + esc(m.icon) + " " + esc(m.label) + "<div class='m'>" + esc(m.os_full || m.os) + " · " + what + "</div></li>";
       });
       html += "</ul></div>";
     }
     var t = st.today || {}, stats = [];
-    if (t.agent_seconds >= 60) stats.push([dur(t.agent_seconds), "agent time today"]);
-    if (t.tokens && !hide.tokens) stats.push([tokens(t.tokens), "tokens today"]);
-    if (t.commits) stats.push([t.commits, "commits today"]);
-    if (st.streak >= 2) stats.push([st.streak + " days", "coding streak"]);
-    if (live && stats.length) {
+    if (live && t.agent_seconds >= 60) stats.push([dur(t.agent_seconds), "agent time today"]);
+    if (live && t.tokens && !hide.tokens) stats.push([tokens(t.tokens), "tokens today"]);
+    if (live && t.commits) stats.push([t.commits, "commits today"]);
+    (st.highlights || []).forEach(function (h) {
+      if (!(hide.tokens && h.key === "tokens") && !(h.key === "streak" && stats.some(function (x) { return x[1] === "coding streak"; })))
+        stats.push([h.value, h.label]);
+    });
+    if (!st.highlights && st.streak >= 2) stats.push([st.streak + " days", "coding streak"]);
+    if (stats.length) {
       html += "<div class='sec'><div class='stats'>" + stats.map(function (s) {
         return "<div class='stat'><b>" + esc(s[0]) + "</b><span>" + esc(s[1]) + "</span></div>";
       }).join("") + "</div></div>";
     }
-    html += "<div class='foot'><span>updated " + esc(ago(st.updated)) + "</span><a href='" +
+    html += "<div class='foot'><span>" + (live ? "● live · updated " + esc(ago(st.updated)) : "updates while I code") + "</span><a href='" +
             esc(st.landing || "https://abelxmendoza.github.io/discord-agent-presence/") +
             "' target='_blank' rel='noopener'>🤖 Agent Presence</a></div></div>";
     root.innerHTML = "<style>" + CSS + "</style>" + html;

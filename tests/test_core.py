@@ -297,33 +297,52 @@ class Machines(unittest.TestCase):
 
 
 class Web(unittest.TestCase):
-    def live(self):
-        return {"claude": {"running_since": time.time() - 600, "focused": False, "projects": ["px4 <x>"],
-                           "roots": {}, "agents": [{"tool": "claude", "status": "busy",
-                                                    "action": "✍ editing nav.cpp", "project": "px4 <x>",
-                                                    "model": "claude-opus-5-5", "mtime": time.time(),
-                                                    "outcome": None, "cwd": None}]}}
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.saved = ap.HABITS_DIR, ap.WEB_STATE
+        ap.HABITS_DIR, ap.WEB_STATE = self.tmp / "habits", self.tmp / "web.json"
 
-    def test_status_hides_files_and_hidden_projects(self):
+    def tearDown(self):
+        ap.HABITS_DIR, ap.WEB_STATE = self.saved
+
+    def agent(self, project, public=False, action="✍ editing nav.cpp", status="busy"):
+        return {"tool": "claude", "status": status, "action": action, "project": project,
+                "public": public, "model": "claude-opus-5-5", "mtime": time.time(),
+                "outcome": None, "cwd": None}
+
+    def live(self, *agents):
+        return {"claude": {"running_since": time.time() - 600, "focused": False,
+                           "projects": [a["project"] for a in agents], "roots": {},
+                           "agents": list(agents)}}
+
+    def test_private_repos_files_and_times_stay_off(self):
         cfg = {**ap.DEFAULT_CONFIG, "hide_projects": ["secret"]}
-        live = self.live()
-        live["claude"]["agents"].append({**live["claude"]["agents"][0], "project": "secret"})
+        live = self.live(self.agent("omega-1", public=True), self.agent("employer-api"),
+                         self.agent("secret"))
         st = ap.web_status(cfg, live)
         self.assertEqual(st["state"], "vibe-coding")
-        self.assertEqual(st["agents"][0]["action"], "✍ editing")
-        self.assertIsNone(st["agents"][1]["project"])
-        self.assertEqual(ap.web_status(cfg, {})["state"], "idle")
-        self.assertEqual(ap.web_status(cfg, live, state="offline")["state"], "offline")
+        self.assertEqual(sorted(a["project"] for a in st["agents"]),
+                         ["a private project", "a private project", "omega-1"])
+        self.assertEqual({a["action"] for a in st["agents"]}, {"✍ editing"})
+        self.assertEqual([p["name"] for p in st["projects"]], ["omega-1"])  # private ones aren't listed
+        blob = json.dumps(st)
+        for leak in ("employer-api", "secret", "nav.cpp", "since", "os_full"):
+            self.assertNotIn(leak, blob)
+        self.assertNotIn("tokens", st["today"])  # off by default on the web
+        off = ap.web_status(cfg, {}, state="offline")
+        self.assertEqual(off["last_active"], "today")
+        self.assertEqual(off["updated"], int(ap._midnight()))  # no exact sign-off time
 
-    def test_svg_is_valid_and_escaped(self):
+    def test_svg_is_valid_escaped_and_clock_free(self):
         import xml.etree.ElementTree as ET
-        st = ap.web_status({**ap.DEFAULT_CONFIG, "web": {**ap.DEFAULT_CONFIG["web"], "name": "A&B"}},
-                           self.live())
-        svg = ap.render_svg(st)
-        ET.fromstring(svg)  # well-formed despite "<x>" and "&" in names
+        cfg = {**ap.DEFAULT_CONFIG, "web": {**ap.DEFAULT_CONFIG["web"], "name": "A&B"}}
+        svg = ap.render_svg(ap.web_status(cfg, self.live(self.agent("px4 <x>", public=True))))
+        ET.fromstring(svg)
         self.assertIn("A&amp;B is vibe coding", svg)
         self.assertIn("px4 &lt;x&gt;", svg)
-        ET.fromstring(ap.render_svg(ap.web_status(ap.DEFAULT_CONFIG, {}, state="offline")))
+        off = ap.render_svg(ap.web_status(cfg, {}, state="offline"))
+        ET.fromstring(off)
+        self.assertNotRegex(off, r"\d{1,2}:\d{2}")  # no clock times anywhere
 
     def test_readme_snippet_insert_and_replace(self):
         md, _ = ap.web_snippets("me/me")
@@ -336,7 +355,7 @@ class Web(unittest.TestCase):
         self.assertEqual(ap.insert_snippet(once, newer).count("agent-presence:start"), 1)
         self.assertTrue(ap.insert_snippet("", md).startswith("<!-- agent-presence:start -->"))
 
-    def test_publish_makes_one_parentless_commit(self):
+    def test_publish_makes_one_parentless_day_dated_commit(self):
         calls = []
 
         def fake(token, method, path, body=None, timeout=15):
@@ -351,7 +370,53 @@ class Web(unittest.TestCase):
             ap.github_call = real
         self.assertEqual([c[0] for c in calls], ["POST", "POST", "PATCH", "POST"])
         self.assertEqual(calls[1][2]["parents"], [])
+        self.assertTrue(calls[1][2]["committer"]["date"].endswith("T00:00:00Z"))
         self.assertEqual(calls[3][2]["ref"], "refs/heads/agent-presence-status")
+
+    def test_habits_record_sessions_outcomes_and_summary(self):
+        h = ap.Habits()
+        base = (int(time.time() // 60) - 120) * 60  # on a minute boundary, earlier today
+        if time.localtime(base).tm_yday != time.localtime().tm_yday:
+            self.skipTest("too close to midnight")
+        ok = {"kind": "tests", "ok": True, "t": time.time() - 60}
+        live = self.live(self.agent("omega-1"))
+        live["claude"]["agents"][0]["outcome"] = ok
+        for i in range(10):                      # 10 active minutes
+            h.record(ap.DEFAULT_CONFIG, live, "MacBook Pro", base + i * 60)
+        self.assertFalse(h.record(ap.DEFAULT_CONFIG, live, "MacBook Pro", base + 9 * 60 + 5))  # same minute
+        for i in range(40, 45):                  # back after a 30-minute gap
+            h.record(ap.DEFAULT_CONFIG, live, "MacBook Pro", base + i * 60)
+        rec = ap.load_habits(1)[date_today()]
+        self.assertEqual(rec["active_minutes"], 15)
+        self.assertEqual(len(rec["sessions"]), 2)
+        self.assertEqual(rec["outcomes"], {"tests_pass": 1})  # counted once
+        self.assertEqual(rec["projects"]["omega-1"], 15)
+        self.assertEqual(rec["machines"]["MacBook Pro"], 15)
+        s = ap.habit_summary()
+        self.assertEqual(s["today"]["sessions"], 2)
+        self.assertEqual(s["today"]["longest_session"], 10)
+        self.assertGreaterEqual(s["streak"], 1)
+        self.assertIn("My coding habits", ap.habits_html(s))
+
+    def test_streaks_and_shared_highlights(self):
+        from datetime import date, timedelta
+        d = date.today()
+        days = {(d - timedelta(days=i)).isoformat() for i in range(4)} | \
+               {(d - timedelta(days=i)).isoformat() for i in range(10, 16)}
+        self.assertEqual(ap._streaks(days), (4, 6))
+        summary = {"streak": 4, "best_streak": 6,
+                   "week": {"active_minutes": 600, "commits": 12, "tokens": 5_000_000},
+                   "month": {"commits": 40, "days": 18, "tests_run": 20, "outcomes": {"tests_pass": 18}}}
+        cfg = {**ap.DEFAULT_CONFIG, "web": {**ap.DEFAULT_CONFIG["web"], "share": ["streak", "week_hours"]}}
+        self.assertEqual([h["key"] for h in ap.web_highlights(cfg, summary)], ["streak", "week_hours"])
+        keys = [h["key"] for h in ap.web_highlights(ap.DEFAULT_CONFIG, summary)]
+        self.assertNotIn("tokens", keys)
+        self.assertIn("tests", keys)
+
+
+def date_today():
+    from datetime import date
+    return date.today().isoformat()
 
 
 class Platform(unittest.TestCase):
