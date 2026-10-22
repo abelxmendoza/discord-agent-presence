@@ -101,6 +101,29 @@ class Transcripts(unittest.TestCase):
             a = ap.codex_agent(write_jsonl(recs), time.time(), self.cfg)
             self.assertEqual((a["outcome"]["kind"], a["outcome"]["ok"]), ("build", ok))
 
+    def test_wsl_agents_are_found(self):
+        self.assertEqual(ap.wsl_path(r"\\wsl.localhost\Ubuntu", "/home/abel/omega"),
+                         r"\\wsl.localhost\Ubuntu\home\abel\omega")
+        self.assertEqual(ap.wsl_path(r"\\wsl.localhost\Ubuntu", "/mnt/c/Users/abel/px4"), r"C:\Users\abel\px4")
+        self.assertEqual(ap.wsl_path(None, "/home/abel/omega"), "/home/abel/omega")
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "abel"
+            proj = home / ".claude/projects/-home-abel-omega"
+            proj.mkdir(parents=True)
+            (proj / "s.jsonl").write_text(json.dumps(
+                {"type": "assistant", "cwd": "/home/abel/omega", "timestamp": now_iso(),
+                 "message": {"model": "claude-opus-5-5", "content": [
+                     {"type": "tool_use", "id": "t", "name": "Bash", "input": {"command": "ls"}}]}}) + "\n")
+            orig = ap.wsl_homes
+            ap.wsl_homes = lambda: [(r"\\wsl.localhost\Ubuntu", home)]
+            try:
+                agents = [a for a in ap.gather_agents(self.cfg) if a["model"] == "claude-opus-5-5"
+                          and "omega" in (a["cwd"] or "")]
+            finally:
+                ap.wsl_homes = orig
+        self.assertEqual(agents[0]["cwd"], r"\\wsl.localhost\Ubuntu\home\abel\omega")
+        self.assertEqual(agents[0]["status"], "busy")
+
     def test_gemini_session(self):
         f = write_jsonl([], suffix=".json")
         f.write_text(json.dumps({"messages": [

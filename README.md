@@ -353,6 +353,11 @@ so their contents aren't read. Each counts as working while it writes its files
 or uses CPU, and as waiting otherwise. If you use one of these and something
 looks off, please open an issue.
 
+**WSL on Windows:** Claude Code and Codex running inside WSL are found too.
+Their logs are read from each running distro's home folders
+(`\\wsl.localhost\<distro>\home\*`). Process-only tools (Copilot, OpenCode,
+Aider, Muse, Grok) inside WSL aren't visible from Windows.
+
 ## How it works
 
 - `/proc` (Linux) or `psutil` (macOS / Windows) lists apps and CLI agents with
