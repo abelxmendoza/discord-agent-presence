@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "discord-agent-presence"
-version = "0.9.0"
+version = "0.9.1"
 description = "Discord Rich Presence for AI coding tools: Claude, Codex, Gemini, Copilot, Grok, Muse, OpenCode, Aider, Cursor, Windsurf, Kiro and VS Code"
 readme = "README.md"
 license = { text = "MIT" }
