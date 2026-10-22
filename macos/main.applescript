@@ -7,17 +7,17 @@ property appTitle : "Agent Presence"
 on run
 	set core to quoted form of (POSIX path of (path to me) & "Contents/Resources/install_core.sh")
 	set ver to do shell script core & " version"
-	set st to do shell script core & " status"
+	set curState to do shell script core & " status"
 	set myIcon to path to resource "applet.icns"
 
-	if st is "not-installed" then
+	if curState is "not-installed" then
 		set msg to "Show what your AI coding agents are doing on your Discord profile." & return & return & ¬
 			"Works with Claude, Codex, Gemini, Copilot, Cursor, VS Code and more. It starts by itself each time you log in, and no code ever leaves your Mac."
 		display dialog msg with title appTitle & " " & ver buttons {"Cancel", "Install"} default button "Install" cancel button "Cancel" with icon myIcon
 		my doInstall(core, myIcon, "installed")
 	else
 		set AppleScript's text item delimiters to " "
-		set parts to text items of st
+		set parts to text items of curState
 		set AppleScript's text item delimiters to ""
 		set installedVer to "?"
 		if (count of parts) > 1 then set installedVer to item 2 of parts
