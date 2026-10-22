@@ -396,13 +396,20 @@
 
     <div class="pane" id="pane-win" role="tabpanel" aria-labelledby="tab-win" hidden>
       <div class="steps">
-        <div class="step"><div><h3>Run the installer in PowerShell</h3><p>Needs Python 3.9+ from <a href="https://www.python.org/downloads/">python.org</a> (tick "Add to PATH"). It downloads the tool, adds the <code>agent-presence</code> command and starts it on login.</p>
-          <pre>irm https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/install.ps1 | iex</pre></div></div>
-        <div class="step"><div><h3>Check everything's found</h3><p>It confirms Discord is running and lists which of your AI apps it detected.</p>
-          <pre>agent-presence doctor</pre></div></div>
-        <div class="step"><div><h3>Preview your cards</h3><p>It prints exactly what Discord will show, line by line. Then open your profile and look.</p>
-          <pre>agent-presence detect</pre></div></div>
+        <div class="step"><div><h3>Download the installer</h3><p>One file for Windows 10 and 11. Python is built in, so there's nothing else to install.</p>
+          <a class="btn btn-primary" href="https://github.com/abelxmendoza/discord-agent-presence/releases/latest/download/AgentPresence-Windows-Setup.exe">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-5-5m5 5l5-5M4 21h16"/></svg>
+            Download for Windows (.exe)
+          </a></div></div>
+        <div class="step"><div><h3>Double-click it and click Install</h3><p>No admin rights needed. It sets everything up, adds the <code>agent-presence</code> command and starts by itself at every login.</p>
+          <p class="note">First time only: Windows may show <b>"Windows protected your PC"</b>, because the installer isn't code-signed yet. Click <b>More info</b>, then <b>Run anyway</b>. The app is open source, so you can read exactly what it does.</p></div></div>
+        <div class="step"><div><h3>Open Discord</h3><p>Start any AI tool and your card shows up on your profile within a few seconds. <b>Agent Presence status</b> in the Start menu (or <code>agent-presence doctor</code>) checks what it found.</p></div></div>
       </div>
+      <details class="alt"><summary>Update, uninstall, or use PowerShell instead</summary>
+        <p>To update, download the new installer and run it again. Uninstall from <b>Settings → Apps</b> or <b>Uninstall Agent Presence</b> in the Start menu.</p>
+        <p>Prefer PowerShell? This does the same thing, using your own Python 3.9+:</p>
+        <pre>irm https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/install.ps1 | iex</pre>
+        <p style="margin-top:10px">Then <code>agent-presence doctor</code> checks Discord and lists the apps it found, and <code>agent-presence detect</code> previews your cards.</p></details>
     </div>
 
     <div class="pane" id="pane-linux" role="tabpanel" aria-labelledby="tab-linux" hidden>
@@ -466,7 +473,7 @@
     <details><summary>Can I rename the cards or use my own icons?</summary>
       <p>Yes. Create your own application in the Discord Developer Portal and put its ID under <code>client_ids</code>. Point <code>image_base_url</code> at your own art for custom pictures.</p></details>
     <details><summary>Does it work on Mac and Windows?</summary>
-      <p>Yes. It runs on Linux (X11), macOS and Windows, and it's tested on all three. On a Mac, download the .dmg and double-click the app; it has a button that walks you through allowing window titles (Accessibility) for editor projects. <code>agent-presence doctor</code> tells you if that's missing. Linux on Wayland can't read window titles yet, but agents and session logs still work.</p></details>
+      <p>Yes. It runs on Linux (X11), macOS and Windows, and it's tested on all three. On Windows, download the .exe installer and double-click it. On a Mac, download the .dmg and double-click the app; it has a button that walks you through allowing window titles (Accessibility) for editor projects. <code>agent-presence doctor</code> tells you if that's missing. Linux on Wayland can't read window titles yet, but agents and session logs still work.</p></details>
     <details><summary>I code on more than one computer. What happens?</summary>
       <p>Install it on each one and link them with <code>agent-presence link</code>. They share one card that follows whichever computer you're using, counts the agents running on all of them, and shows which machines are in use, like <code>🖥 2 machines: 💻 MacBook Pro (3) · 🖥 Aurora R16 (2)</code>. Each card also names the computer and OS. Hostnames are never shown.</p></details>
     <details><summary>Can I add another tool, like Windsurf, Zed or Aider?</summary>
@@ -563,12 +570,12 @@
     update();
   })();
 
-  // Pick the visitor's platform: Mac gets the .dmg, Windows the PowerShell line.
+  // Pick the visitor's platform: Mac gets the .dmg, Windows the .exe.
   (() => {
     const ua = navigator.userAgent, plat = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || "";
     const os = /Mac|iPhone|iPad/i.test(plat + ua) ? "mac" : /Win/i.test(plat + ua) ? "win" : /Linux|X11|CrOS/i.test(plat + ua) ? "linux" : "mac";
     const DMG = "https://github.com/abelxmendoza/discord-agent-presence/releases/latest/download/AgentPresence-macOS.dmg";
-    const WIN = "irm https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/install.ps1 | iex";
+    const EXE = "https://github.com/abelxmendoza/discord-agent-presence/releases/latest/download/AgentPresence-Windows-Setup.exe";
     const dl = document.getElementById("dl"), label = document.getElementById("dl-label");
     const heroCmd = document.getElementById("hero-cmd"), heroNote = document.getElementById("hero-note");
     if (os === "mac") {
@@ -576,11 +583,15 @@
       document.querySelectorAll("[data-dl]").forEach(a => { a.href = DMG; a.textContent = "Download for Mac"; });
       heroCmd.hidden = true;
       heroNote.innerHTML = "Apple silicon &amp; Intel · macOS 11+ · double-click to install, no terminal · free and open source (MIT) · <a href=\"#install\">Windows &amp; Linux ↓</a>";
+    } else if (os === "win") {
+      dl.href = EXE; label.textContent = "Download for Windows";
+      document.querySelectorAll("[data-dl]").forEach(a => { a.href = EXE; a.textContent = "Download for Windows"; });
+      heroCmd.hidden = true;
+      heroNote.innerHTML = "Windows 10 &amp; 11 · Python built in · double-click to install, no admin needed · free and open source (MIT) · <a href=\"#install\">Mac &amp; Linux ↓</a>";
     } else {
-      dl.href = "#install"; label.textContent = os === "win" ? "Install on Windows" : "Install on Linux";
+      dl.href = "#install"; label.textContent = "Install on Linux";
       document.querySelectorAll("[data-dl]").forEach(a => { a.href = "#install"; a.textContent = label.textContent; });
-      if (os === "win") heroCmd.querySelector(".cmd").textContent = WIN;
-      heroNote.innerHTML = "Linux · macOS · Windows · free and open source (MIT) · <a href=\"#install\">Mac app &amp; other options ↓</a>";
+      heroNote.innerHTML = "Linux · macOS · Windows · free and open source (MIT) · <a href=\"#install\">Mac &amp; Windows apps ↓</a>";
     }
     // Tabs
     const tabs = [...document.querySelectorAll("#install .tab")];
