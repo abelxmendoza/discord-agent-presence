@@ -34,9 +34,9 @@ jobs:
       WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
       WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
     steps:
+      # A manual run builds the branch it runs on (like macos-app), so an
+      # older tag can still get an installer.
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
