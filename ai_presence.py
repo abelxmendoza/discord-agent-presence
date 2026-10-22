@@ -3092,9 +3092,15 @@ WantedBy=graphical-session.target
           f"\nLive log:            {log_hint()}")
 
 
-def cmd_link(key=None, off=False):
+def cmd_link(key=None, off=False, print_key=False):
     import secrets
     cfg = load_config()
+    if print_key:  # just the key, made if needed (for the Mac app)
+        if not cfg["link_key"]:
+            cfg["link_key"] = secrets.token_urlsafe(12)
+            CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+        print(cfg["link_key"])
+        return
     if off:
         cfg["link_key"] = ""
         print("Unlinked. This computer shows its own card again.")
@@ -3195,7 +3201,7 @@ def cmd_web(action, repo=None, name=None, token=None, readme=False, yes=False):
     # setup
     if token:
         cfg["web"] = {**w, "token": token}
-    elif not (os.environ.get("AGENT_PRESENCE_TOKEN") or w.get("token")) and find_gh():
+    elif not (os.environ.get("AGENT_PRESENCE_TOKEN") or w.get("token")) and find_gh() and not yes:
         print("Safer option: a fine-grained token that can only write your profile repo.\n"
               "  1. https://github.com/settings/personal-access-tokens/new\n"
               "  2. Repository access: only <you>/<you>. Permissions: Contents → Read and write.\n"
@@ -3309,6 +3315,7 @@ def cli():
     lp = sub.add_parser("link", help="share one card across your computers")
     lp.add_argument("key", nargs="?", help="the key from your first computer")
     lp.add_argument("--off", action="store_true", help="stop sharing")
+    lp.add_argument("--print-key", action="store_true", help="print only the key (made if needed)")
     sub.add_parser("machines", help="show this computer and your linked ones")
     stp = sub.add_parser("stats", help="your coding habits (private, from this computer)")
     stp.add_argument("--html", action="store_true", help="open a private report in your browser")
@@ -3318,12 +3325,13 @@ def cli():
     wp.add_argument("--name", help="name on the card (default: your GitHub login)")
     wp.add_argument("--token", help="a GitHub token, if you don't use the GitHub CLI")
     wp.add_argument("--readme", action="store_true", help="also add the card to your profile README")
-    wp.add_argument("-y", "--yes", action="store_true", help="don't ask before editing the README")
+    wp.add_argument("-y", "--yes", action="store_true",
+                    help="don't ask: use the GitHub CLI login, and edit the README if --readme")
     args, _ = ap.parse_known_args(["detect" if a == "--detect" else a for a in sys.argv[1:]])
     if args.cmd == "setup":
         return cmd_setup(args.dry_run, args.quiet)
     if args.cmd == "link":
-        return cmd_link(args.key, args.off)
+        return cmd_link(args.key, args.off, args.print_key)
     if args.cmd == "stats":
         return cmd_stats(args.html)
     if args.cmd == "web":

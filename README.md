@@ -43,7 +43,8 @@ and Intel, macOS 11+.
 > because it isn't from the App Store. Click **Done**, open **System Settings →
 > Privacy & Security**, scroll down and click **Open Anyway** next to Agent
 > Presence. Open the app again any time to **Update**, **Restart** or
-> **Uninstall**. If your Mac has no Python yet, the app walks you through
+> **Uninstall**, or click **More…** to show your status on your GitHub
+> profile and website, or to link your other computers. If your Mac has no Python yet, the app walks you through
 > Apple's free Command Line Tools installer.
 
 **Windows:** [**⬇ Download AgentPresence-Windows-Setup.exe**](https://github.com/abelxmendoza/discord-agent-presence/releases/latest/download/AgentPresence-Windows-Setup.exe),
@@ -156,6 +157,8 @@ agent-presence link <key>      # on each of the others
 agent-presence setup           # restart on each to apply
 ```
 
+On a Mac, the app does this too: **More… → Link my other computers**.
+
 Linked computers on the same network share **one card**. It sits on whichever
 computer you touched last (keyboard or mouse) and moves about 15 seconds after
 you switch, with a short `↪ moved to MacBook Pro` line. Every machine's agents
@@ -220,6 +223,8 @@ computers you're on, and today's agent time, tokens, commits and streak.
 ```bash
 agent-presence web setup --readme   # then: agent-presence setup  (to restart)
 ```
+
+On a Mac, the app does this too: **More… → Show it on my GitHub profile and website**.
 
 It uses your GitHub CLI login (`gh auth login`), or `--token` with a
 fine-grained token that has *Contents: Read and write* on the repo. It

@@ -7,6 +7,9 @@
 #     (or the steps one at a time: files, runtime, service)
 #   install_core.sh uninstall
 #   install_core.sh python-path         the Python binary the login service runs
+#   install_core.sh web [--readme]      publish to your GitHub profile, then restart
+#   install_core.sh link-key            this computer's link key (made if needed)
+#   install_core.sh link <key>          share one card with your other computers, then restart
 #
 # Exit 3 from install/runtime means no usable Python 3.9+ was found.
 set -euo pipefail
@@ -20,7 +23,7 @@ LOG="$HOME/Library/Logs/agent-presence-install.log"
 VENV_PY="$DEST/.venv/bin/python"
 
 mkdir -p "$(dirname "$LOG")"
-exec 2>>"$LOG"
+exec 3>&2 2>>"$LOG"  # fd 3 keeps the caller's stderr for messages meant for the app
 note() { echo "$(date '+%F %T') $*" >>"$LOG"; }
 
 version() { cat "$RES/VERSION" 2>/dev/null || echo "?"; }
@@ -88,6 +91,18 @@ step_service() {
   "$VENV_PY" "$DEST/ai_presence.py" setup --quiet >>"$LOG"
 }
 
+# Run the tool; on failure its last lines go to the app's error dialog.
+tool() {
+  local out
+  if ! out="$("$VENV_PY" "$DEST/ai_presence.py" "$@" 2>&1)"; then
+    note "agent-presence $1 failed: $out"
+    echo "$out" | tail -n 6 >&3
+    return 1
+  fi
+  note "agent-presence $1: $out"
+  echo "$out"
+}
+
 is_running() {
   launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1
 }
@@ -124,9 +139,23 @@ case "${1:-}" in
     if grep -qs "$DEST" "$BIN/agent-presence"; then rm -f "$BIN/agent-presence"; fi
     rm -rf "$DEST"
     note "uninstall done" ;;
+  # These run the app's own copy of the tool (an older installed one may not
+  # know the options), and each is followed by a restart, which loads it.
+  web)
+    step_files
+    tool web setup --yes ${2:+--readme} >/dev/null
+    step_service ;;
+  link-key)
+    step_files
+    tool link --print-key ;;
+  link)
+    [ -n "${2:-}" ] || { echo "no key given" >&3; exit 2; }
+    step_files
+    tool link "$2" >/dev/null
+    step_service ;;
   python-path)
     "$VENV_PY" -c 'import os, sys; print(os.path.realpath(sys._base_executable if hasattr(sys, "_base_executable") else sys.executable))' ;;
   *)
-    echo "usage: $0 status|install [--skip-service]|files|runtime|service|uninstall|python-path" >&2
+    echo "usage: $0 status|install [--skip-service]|files|runtime|service|uninstall|python-path|web [--readme]|link-key|link <key>" >&2
     exit 2 ;;
 esac

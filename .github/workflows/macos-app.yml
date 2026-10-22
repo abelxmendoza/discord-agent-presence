@@ -45,6 +45,8 @@ jobs:
           ~/.local/bin/agent-presence doctor
           ~/.local/bin/agent-presence setup --dry-run
           "$CORE" python-path
+          KEY="$("$CORE" link-key)"
+          test -n "$KEY" && test "$("$CORE" link-key)" = "$KEY"
           "$CORE" uninstall
           test ! -e ~/.local/bin/agent-presence
           test ! -d "$HOME/Library/Application Support/Agent Presence"

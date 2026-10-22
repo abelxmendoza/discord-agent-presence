@@ -3,6 +3,9 @@
 -- Contents/Resources/install_core.sh.
 
 property appTitle : "Agent Presence"
+property webChoice : "Show it on my GitHub profile and website"
+property linkChoice : "Link my other computers"
+property uninstallChoice : "Uninstall"
 
 on run
 	set core to quoted form of (POSIX path of (path to me) & "Contents/Resources/install_core.sh")
@@ -32,9 +35,9 @@ on run
 			set mainButton to "Update to " & ver
 		end if
 		set r to display dialog appTitle & " " & installedVer & " " & stateText & "." & return & return & ¬
-			"Your card appears on your Discord profile whenever an AI tool is open." with title appTitle buttons {"Uninstall…", "Done", mainButton} default button mainButton cancel button "Done" with icon myIcon
-		if button returned of r is "Uninstall…" then
-			my doUninstall(core, myIcon)
+			"Your card appears on your Discord profile whenever an AI tool is open." with title appTitle buttons {"More…", "Done", mainButton} default button mainButton cancel button "Done" with icon myIcon
+		if button returned of r is "More…" then
+			my moreMenu(core, myIcon)
 		else
 			my doInstall(core, myIcon, "updated")
 		end if
@@ -126,6 +129,69 @@ on allowTitles(core, myIcon)
 	display dialog msg with title appTitle buttons {"Open Settings"} default button "Open Settings" with icon myIcon
 	open location "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
 end allowTitles
+
+on moreMenu(core, myIcon)
+	set picked to choose from list {webChoice, linkChoice, uninstallChoice} with title appTitle with prompt "What would you like to do?" OK button name "Continue"
+	if picked is false then return
+	set picked to item 1 of picked
+	if picked is webChoice then
+		my setUpWeb(core, myIcon)
+	else if picked is linkChoice then
+		my linkComputers(core, myIcon)
+	else
+		my doUninstall(core, myIcon)
+	end if
+end moreMenu
+
+-- Publishes status.json and status.svg to your GitHub profile repo, for the
+-- README card and the website widget. Linked computers' agents are included.
+on setUpWeb(core, myIcon)
+	set msg to "Show what you're coding on your GitHub profile README and your website, updated every couple of minutes." & return & return & ¬
+		"It uses your GitHub CLI login (gh auth login) to keep a status branch in your profile repo. Private repos are never named." & return & return & ¬
+		"Also add the card to your profile README? (One commit; skip it if you'll add it yourself.)"
+	set r to display dialog msg with title appTitle buttons {"Cancel", "Status Only", "Add to README"} default button "Add to README" cancel button "Cancel" with icon myIcon
+	set extra to ""
+	if button returned of r is "Add to README" then set extra to " --readme"
+	try
+		do shell script core & " web" & extra
+	on error errMsg
+		my failed(errMsg & return & return & "Install the GitHub CLI (brew install gh) and run gh auth login in Terminal, then try again.", myIcon)
+	end try
+	display dialog "Publishing. Your GitHub card and website widget update within a couple of minutes, with the agents from all your linked computers." with title appTitle buttons {"Done"} default button "Done" with icon myIcon
+end setUpWeb
+
+on linkComputers(core, myIcon)
+	set msg to "Linked computers share one Discord card and one GitHub status, showing every computer's agents. On different networks, also turn on " & quote & webChoice & quote & " on each." & return & return & ¬
+		"On your first computer, get a key. On each of the others, enter it."
+	set r to display dialog msg with title appTitle buttons {"Cancel", "Enter a Key", "Get a Key"} default button "Get a Key" cancel button "Cancel" with icon myIcon
+	if button returned of r is "Get a Key" then
+		try
+			set k to do shell script core & " link-key"
+		on error errMsg
+			my failed(errMsg, myIcon)
+		end try
+		set the clipboard to k
+		-- Restart so this computer starts listening with the key.
+		try
+			do shell script core & " service"
+		on error errMsg
+			my failed(errMsg, myIcon)
+		end try
+		display dialog "Your link key (copied):" & return & return & k & return & return & ¬
+			"On another Mac: open Agent Presence → More… → " & linkChoice & " → Enter a Key." & return & ¬
+			"On Linux or Windows: agent-presence link " & k & " then agent-presence setup" & return & return & ¬
+			"Keep it private. If macOS asks to let Python find devices on your network, click Allow." with title appTitle buttons {"Done"} default button "Done" with icon myIcon
+	else
+		set k to text returned of (display dialog "Paste the link key from your first computer:" default answer "" with title appTitle buttons {"Cancel", "Link"} default button "Link" cancel button "Cancel" with icon myIcon)
+		if k is "" then return
+		try
+			do shell script core & " link " & quoted form of k
+		on error errMsg
+			my failed(errMsg, myIcon)
+		end try
+		display dialog "Linked. This computer's agents now show on your card and GitHub status. If macOS asks to let Python find devices on your network, click Allow." with title appTitle buttons {"Done"} default button "Done" with icon myIcon
+	end if
+end linkComputers
 
 on doUninstall(core, myIcon)
 	display dialog "Remove Agent Presence? Your Discord card stops showing. Your settings file is kept in case you come back." with title appTitle buttons {"Cancel", "Uninstall"} default button "Cancel" cancel button "Cancel" with icon caution
