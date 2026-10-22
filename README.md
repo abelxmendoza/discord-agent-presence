@@ -6,6 +6,7 @@
 
 <p align="center">
   <a href="https://github.com/abelxmendoza/discord-agent-presence/releases/latest/download/AgentPresence-macOS.dmg"><img src="https://img.shields.io/badge/⬇_Download_for_Mac-.dmg-5865F2?style=for-the-badge&logo=apple&logoColor=white" alt="Download for Mac"></a>
+  <a href="https://github.com/abelxmendoza/discord-agent-presence/releases/latest/download/AgentPresence-Windows-Setup.exe"><img src="https://img.shields.io/badge/⬇_Download_for_Windows-.exe-5865F2?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows"></a>
   <a href="https://abelxmendoza.github.io/discord-agent-presence/"><img src="https://img.shields.io/badge/Website-live_demo-F97316?style=for-the-badge&logo=githubpages&logoColor=white" alt="Website"></a>
   <a href="https://github.com/abelxmendoza/discord-agent-presence/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/abelxmendoza/discord-agent-presence/test.yml?branch=main&style=for-the-badge&label=tests" alt="Tests"></a>
 </p>
@@ -45,13 +46,23 @@ and Intel, macOS 11+.
 > **Uninstall**. If your Mac has no Python yet, the app walks you through
 > Apple's free Command Line Tools installer.
 
+**Windows:** [**⬇ Download AgentPresence-Windows-Setup.exe**](https://github.com/abelxmendoza/discord-agent-presence/releases/latest/download/AgentPresence-Windows-Setup.exe),
+double-click it and click **Install**. Python is built in and no admin rights
+are needed; it adds the `agent-presence` command and starts at every login.
+Windows 10 and 11.
+
+> **First time only:** the installer isn't code-signed yet, so SmartScreen may
+> say **"Windows protected your PC"**. Click **More info**, then **Run anyway**.
+> To update, run the newest installer again. Uninstall from **Settings → Apps**
+> or **Uninstall Agent Presence** in the Start menu.
+
 **Linux / macOS terminal**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/install.sh | bash
 ```
 
-**Windows** (PowerShell)
+**Windows PowerShell** (uses your own Python 3.9+)
 
 ```powershell
 irm https://raw.githubusercontent.com/abelxmendoza/discord-agent-presence/main/install.ps1 | iex
@@ -338,6 +349,12 @@ The Mac app is built by `macos/build_app.sh` (on a Mac) and the `macos-app`
 workflow, which smoke-tests it and attaches the .dmg to each release. Set the
 `MACOS_SIGN_IDENTITY` and `APPLE_*` repo secrets to sign and notarize it so it
 opens without the Privacy & Security step.
+
+The Windows installer is built by `windows/build_installer.ps1` (Inno Setup,
+with the embeddable Python and psutil bundled) and the `windows-installer`
+workflow, which installs, upgrades and uninstalls it on a Windows runner and
+attaches the .exe to each release. Set the `WINDOWS_CERT_PFX` and
+`WINDOWS_CERT_PASSWORD` repo secrets to sign it so SmartScreen doesn't warn.
 
 The tests use synthetic session logs and a fake Discord server (Unix socket or
 Windows named pipe). MIT licensed.

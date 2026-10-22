@@ -1,0 +1,125 @@
+name: windows-installer
+
+# Builds the double-click Windows installer (AgentPresence-Windows-Setup.exe),
+# installs, upgrades and uninstalls it on a runner, and attaches it to the
+# GitHub release.
+#
+# Signing is optional. Without it, SmartScreen shows "Windows protected your
+# PC" the first time (More info -> Run anyway). To sign, add these secrets:
+#   WINDOWS_CERT_PFX           base64 of a code-signing .pfx
+#   WINDOWS_CERT_PASSWORD      its password
+
+on:
+  push:
+    paths: ["windows/**", "ai_presence.py", "pyproject.toml", ".github/workflows/windows-installer.yml"]
+    tags: ["v*"]
+  pull_request:
+    paths: ["windows/**", "ai_presence.py", "pyproject.toml", ".github/workflows/windows-installer.yml"]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.9.0) to attach the installer to. Blank = build only."
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag || (startsWith(github.ref, 'refs/tags/v') && github.ref_name) || '' }}
+      WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+      WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Inno Setup
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+
+      - name: Build installer
+        run: windows\build_installer.ps1
+
+      - name: Sign
+        if: env.WINDOWS_CERT_PFX != ''
+        run: |
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\cert.pfx", [Convert]::FromBase64String($env:WINDOWS_CERT_PFX))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Select-Object -Last 1
+          & $signtool.FullName sign /f "$env:RUNNER_TEMP\cert.pfx" /p $env:WINDOWS_CERT_PASSWORD /fd sha256 `
+            /tr http://timestamp.digicert.com /td sha256 dist\AgentPresence-Windows-Setup.exe
+          if ($LASTEXITCODE) { throw "signing failed" }
+
+      - name: Test install, upgrade and uninstall
+        run: |
+          $app = "$env:LOCALAPPDATA\Programs\Agent Presence"
+          $vbs = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\agent-presence.vbs"
+          function Install($log) {
+            # Not -Wait: that also waits for the background copy setup starts.
+            $p = Start-Process dist\AgentPresence-Windows-Setup.exe -PassThru `
+              -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/LOG=$log"
+            if (-not $p.WaitForExit(300000)) { throw "installer timed out" }
+            Get-Content $log -Tail 15
+            if ($p.ExitCode) { throw "installer exited $($p.ExitCode)" }
+          }
+          function Running { @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'ai_presence\.py"? run' }) }
+
+          # Pretend an older PowerShell (install.ps1) install is on PATH.
+          $legacy = "$env:LOCALAPPDATA\discord-agent-presence"
+          New-Item -ItemType Directory -Force $legacy | Out-Null
+          Set-Content "$legacy\agent-presence.cmd" "@echo legacy"
+          [Environment]::SetEnvironmentVariable("Path", ([Environment]::GetEnvironmentVariable("Path", "User") + ";$legacy"), "User")
+
+          Install install.log
+          if (Test-Path $legacy) { throw "old PowerShell install left behind" }
+          if (([Environment]::GetEnvironmentVariable("Path", "User") -split ";") -contains $legacy) { throw "old PATH entry left behind" }
+          & "$app\agent-presence.cmd" --help; if ($LASTEXITCODE) { throw "--help failed" }
+          & "$app\agent-presence.cmd" doctor; if ($LASTEXITCODE) { throw "doctor failed" }
+          if (-not (Test-Path $vbs)) { throw "no startup entry" }
+          Get-Content $vbs
+          if (([Environment]::GetEnvironmentVariable("Path", "User") -split ";") -notcontains $app) { throw "not on PATH" }
+          Start-Sleep 3
+          if (-not (Running)) { throw "not running in the background" }
+
+          # Installing again over a running copy (an update) must work.
+          Install upgrade.log
+          Start-Sleep 3
+          if ((Running).Count -ne 1) { throw "expected one running copy, found $((Running).Count)" }
+
+          Start-Process "$app\unins000.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"
+          for ($i = 0; $i -lt 90 -and (Test-Path $app); $i++) { Start-Sleep 1 }
+          if (Test-Path $app) { Get-ChildItem $app -Recurse | Select-Object -First 20; throw "app folder left behind" }
+          if (Test-Path $vbs) { throw "startup entry left behind" }
+          if (([Environment]::GetEnvironmentVariable("Path", "User") -split ";") -contains $app) { throw "PATH entry left behind" }
+          if (Running) { throw "still running after uninstall" }
+          "install, upgrade and uninstall OK"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AgentPresence-Windows
+          path: dist/AgentPresence-Windows-Setup.exe
+
+      # The macos-app workflow creates the release (with notes) for a new tag;
+      # whichever runs first creates it, the other just uploads.
+      - name: Attach to release
+        if: env.TAG != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view $env:TAG *> $null
+          if ($LASTEXITCODE) {
+            $title = if (Test-Path ".github/release-notes/$env:TAG.title") { Get-Content ".github/release-notes/$env:TAG.title" -TotalCount 1 } else { $env:TAG }
+            $notes = if (Test-Path ".github/release-notes/$env:TAG.md") { ".github/release-notes/$env:TAG.md" } else { $null }
+            if ($notes) { gh release create $env:TAG --target $env:GITHUB_SHA --latest --title "$title" --notes-file $notes }
+            else { gh release create $env:TAG --target $env:GITHUB_SHA --latest --title "$title" --generate-notes }
+            if ($LASTEXITCODE) { Start-Sleep 20 }  # the macOS job made it first
+          }
+          gh release upload $env:TAG dist/AgentPresence-Windows-Setup.exe --clobber
+          if ($LASTEXITCODE) { throw "upload failed" }
