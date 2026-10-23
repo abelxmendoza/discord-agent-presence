@@ -968,28 +968,32 @@ def gather_agents(cfg, procs=None):
                       else cfg["agent_active_seconds"])
 
     def session_mtime(f):
-        """Newest write to a Claude session, counting its subagents' logs,
-        which live in a folder named after the session."""
+        """(newest write to a Claude session, newest write by its subagents).
+        Subagents log in a folder named after the session."""
         m = f.stat().st_mtime
+        sub_m = 0
         sub = f.with_suffix("")
         if now - m < 86400 and sub.is_dir():
             for g in sub.rglob("*.jsonl"):
                 try:
-                    m = max(m, g.stat().st_mtime)
+                    sub_m = max(sub_m, g.stat().st_mtime)
                 except OSError:
                     pass
-        return m
+        return max(m, sub_m), sub_m
 
     for root, home in agent_homes():
         found = []
         for base in home.glob(".claude*/projects"):
             for f in base.glob("*/*.jsonl"):
                 try:
-                    m = session_mtime(f)
+                    m, sub_m = session_mtime(f)
                 except OSError:
                     continue
                 if m >= keep:
                     a = claude_agent(f, m, cfg)
+                    if now - sub_m < 60 and a["status"] == "waiting":
+                        # Background subagents still working after the turn ended.
+                        a["status"], a["action"] = "busy", "🤖 directing a subagent"
                     if wanted(a):
                         found.append(a)
         sessions = home / ".codex/sessions"

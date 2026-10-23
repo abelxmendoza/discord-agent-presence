@@ -151,6 +151,22 @@ class Transcripts(unittest.TestCase):
         crew = next(a for a in agents if a["action"].startswith("🤖"))
         self.assertGreater(crew["mtime"], old + 600)  # the subagent's write counts
 
+    def test_background_subagents_keep_the_session_busy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = Path(tmp) / ".claude/projects/-x"
+            (proj / "s" / "subagents").mkdir(parents=True)
+            (proj / "s.jsonl").write_text(json.dumps(
+                {"type": "assistant", "cwd": "/x", "timestamp": now_iso(),
+                 "message": {"stop_reason": "end_turn", "content": [{"type": "text", "text": "started"}]}}) + "\n")
+            (proj / "s" / "subagents" / "agent-1.jsonl").write_text("{}\n")
+            orig = ap.HOME
+            ap.HOME = Path(tmp)
+            try:
+                a, = ap.gather_agents(self.cfg)
+            finally:
+                ap.HOME = orig
+        self.assertEqual((a["status"], a["action"]), ("busy", "🤖 directing a subagent"))
+
     def test_gemini_session(self):
         f = write_jsonl([], suffix=".json")
         f.write_text(json.dumps({"messages": [
