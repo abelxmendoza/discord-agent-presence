@@ -715,6 +715,8 @@ def claude_agent(f, mtime, cfg):
                     info["status"], info["action"] = "waiting", "⏳ needs my approval"
                 else:
                     info["action"] = action_for(use.get("name", ""), use.get("input"), cfg["show_files"])
+                    # A build, test run or subagent can go quiet for many minutes.
+                    info["long_running"] = use.get("name") in ("Bash", "Agent", "Task")
             elif msg.get("stop_reason") == "end_turn":
                 info["status"], info["action"] = "waiting", "⏳ waiting for me"
 
@@ -962,15 +964,28 @@ def gather_agents(cfg, procs=None):
 
     def wanted(a):
         age = now - a["mtime"]
-        return age < (cfg["agent_waiting_seconds"] if a["status"] == "waiting"
+        return age < (cfg["agent_waiting_seconds"] if a["status"] == "waiting" or a.get("long_running")
                       else cfg["agent_active_seconds"])
+
+    def session_mtime(f):
+        """Newest write to a Claude session, counting its subagents' logs,
+        which live in a folder named after the session."""
+        m = f.stat().st_mtime
+        sub = f.with_suffix("")
+        if now - m < 86400 and sub.is_dir():
+            for g in sub.rglob("*.jsonl"):
+                try:
+                    m = max(m, g.stat().st_mtime)
+                except OSError:
+                    pass
+        return m
 
     for root, home in agent_homes():
         found = []
         for base in home.glob(".claude*/projects"):
             for f in base.glob("*/*.jsonl"):
                 try:
-                    m = f.stat().st_mtime
+                    m = session_mtime(f)
                 except OSError:
                     continue
                 if m >= keep:
