@@ -124,6 +124,49 @@ class Transcripts(unittest.TestCase):
         self.assertEqual(agents[0]["cwd"], r"\\wsl.localhost\Ubuntu\home\abel\omega")
         self.assertEqual(agents[0]["status"], "busy")
 
+    def test_quiet_builds_and_subagents_still_count(self):
+        old = time.time() - 900  # 15 minutes without a write to the main log
+        use = lambda name: [{"type": "assistant", "cwd": "/x", "timestamp": now_iso(),
+                             "message": {"model": "claude-opus-5-5", "content": [
+                                 {"type": "tool_use", "id": "t", "name": name, "input": {"command": "make"}}]}}]
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = Path(tmp) / ".claude/projects/-x"
+            proj.mkdir(parents=True)
+            for sid, name in (("build", "Bash"), ("edit", "Edit"), ("crew", "Agent")):
+                f = proj / f"{sid}.jsonl"
+                f.write_text("".join(json.dumps(r) + "\n" for r in use(name)))
+                os.utime(f, (old, old))
+            sub = proj / "crew" / "subagents"
+            sub.mkdir(parents=True)
+            (sub / "agent-1.jsonl").write_text("{}\n")  # a subagent writing right now
+            orig = ap.HOME
+            ap.HOME = Path(tmp)
+            try:
+                agents = ap.gather_agents(self.cfg)
+            finally:
+                ap.HOME = orig
+        status = {a["action"]: a["status"] for a in agents}
+        self.assertEqual(status, {"🔨 building": "busy", "🤖 directing a subagent": "busy",
+                                  "⏳ needs my approval": "waiting"})  # a stuck edit is asking you
+        crew = next(a for a in agents if a["action"].startswith("🤖"))
+        self.assertGreater(crew["mtime"], old + 600)  # the subagent's write counts
+
+    def test_background_subagents_keep_the_session_busy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = Path(tmp) / ".claude/projects/-x"
+            (proj / "s" / "subagents").mkdir(parents=True)
+            (proj / "s.jsonl").write_text(json.dumps(
+                {"type": "assistant", "cwd": "/x", "timestamp": now_iso(),
+                 "message": {"stop_reason": "end_turn", "content": [{"type": "text", "text": "started"}]}}) + "\n")
+            (proj / "s" / "subagents" / "agent-1.jsonl").write_text("{}\n")
+            orig = ap.HOME
+            ap.HOME = Path(tmp)
+            try:
+                a, = ap.gather_agents(self.cfg)
+            finally:
+                ap.HOME = orig
+        self.assertEqual((a["status"], a["action"]), ("busy", "🤖 directing a subagent"))
+
     def test_gemini_session(self):
         f = write_jsonl([], suffix=".json")
         f.write_text(json.dumps({"messages": [
