@@ -570,14 +570,14 @@ class CrossDevice(unittest.TestCase):
             self.skipTest("too close to midnight")
         return base
 
-    def record_on(self, folder, minutes, n=1, label="PC", cloud=0):
+    def record_on(self, folder, minutes, n=1, label="PC", cloud=0, sid=None):
         """Record `minutes` (offsets from base) as if on another computer."""
         keep = ap.HABITS_DIR
         ap.HABITS_DIR = folder
         try:
             h = ap.Habits()
             for i in minutes:
-                h.record(ap.DEFAULT_CONFIG, self.live(n) if n else {}, label, self.b + i * 60, cloud=cloud)
+                h.record(ap.DEFAULT_CONFIG, self.live(n, sid=sid or label) if n else {}, label, self.b + i * 60, cloud=cloud)
             return ap.habit_packet(ap.DEFAULT_CONFIG, label.lower(), label)
         finally:
             ap.HABITS_DIR = keep
@@ -672,6 +672,25 @@ class CrossDevice(unittest.TestCase):
         self.assertNotIn("days", written["agent-presence-habits-mac"]["habits.txt"])  # sealed
         self.assertEqual([p["id"] for p in relay.inbox], ["pc"])
 
+    def test_shared_session_stats_count_once(self):
+        """Windows reading WSL and agent-presence inside WSL both log session "a"."""
+        self.b = self.base()
+        saved = ap.today_sessions
+        ap.today_sessions = lambda every=60: {"a": ("claude", 600, 1000)}
+        try:
+            self.record_on(ap.HABITS_DIR, range(0, 10), n=1, label="Windows", sid="a")
+            wsl = self.record_on(self.tmp / "wsl", range(0, 10), n=1, label="WSL", sid="a")
+            ap.save_peer_habits(wsl, "windows")
+            rec = ap.load_habits(1)[date_today()]
+            self.assertEqual((rec["agent_minutes"], rec["max_parallel"]), (10, 1))
+            self.assertEqual((rec["agent_seconds"], rec["tokens"]), (600, 1000))
+            ap.note_peer_today([{"id": "wsl", "today": {"day": date_today(),
+                                                         "sessions": {"a": ["claude", 600, 1000],
+                                                                      "b": ["chatgpt", 60, 5]}}}])
+            self.assertEqual(ap.all_today_stats(), {"claude": (600, 1000), "chatgpt": (60, 5)})
+        finally:
+            ap.today_sessions = saved
+
     def test_same_session_from_two_computers_counts_once(self):
         live = self.live(2, sid="wsl")
         peer = {"id": "wsl-box", "model": "WSL", "tools": {}, "agents": [
@@ -684,7 +703,7 @@ class CrossDevice(unittest.TestCase):
         ap.STATS_AT[0] = time.time()  # skip scanning this machine's real logs
         mine = ap.today_stats()
         today = date_today()
-        ap.note_peer_today([{"id": "pc", "today": {"day": today, "tools": {"chatgpt": [600, 1000]},
+        ap.note_peer_today([{"id": "pc", "today": {"day": today, "sessions": {"x": ["chatgpt", 600, 1000]},
                                                     "commits": {"omega": 4, "px4": 1}}},
                             {"id": "old", "today": {"day": "2001-01-01", "tools": {"claude": [9, 9]}}}])
         got = ap.all_today_stats()
@@ -706,6 +725,7 @@ class CrossDevice(unittest.TestCase):
             if path == "/user":
                 return {"login": "me"}
             if path.startswith("/users/me/events"):
+                time.sleep(0.2)  # a slow GitHub
                 return events
             if path == "/repos/me/omega/commits/abc":
                 return {"commit": {"message": "x\n\nClaude-Session: https://claude.ai/code/session_01AbC"}}
@@ -713,8 +733,15 @@ class CrossDevice(unittest.TestCase):
         saved = ap.github_call, ap.github_token
         ap.github_call, ap.github_token = call, lambda cfg: "tok"
         try:
-            cloud = ap.cloud_agents(ap.DEFAULT_CONFIG)
+            cloud = ap.fetch_cloud_agents(ap.DEFAULT_CONFIG)
             self.assertEqual(ap.cloud_agents({**ap.DEFAULT_CONFIG, "cloud_agents": False}), [])
+            ap.CLOUD.update(agents=[], at=0.0, busy=False)
+            self.assertEqual(ap.cloud_agents(ap.DEFAULT_CONFIG), [])   # returns at once...
+            for _ in range(100):
+                if not ap.CLOUD["busy"]:
+                    break
+                time.sleep(0.02)
+            self.assertEqual(len(ap.cloud_agents(ap.DEFAULT_CONFIG)), 1)  # ...and has it next time
         finally:
             ap.github_call, ap.github_token = saved
         self.assertEqual([(a["project"], a["public"], a["status"]) for a in cloud], [("omega", True, "busy")])

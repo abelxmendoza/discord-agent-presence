@@ -1204,6 +1204,15 @@ def _scan(path, tool, kind, midnight):
 
 def today_stats(every=60):
     """{tool: (agent_seconds, tokens)} for today. Refreshes at most once a minute."""
+    out = {}
+    for tool, secs, tok in today_sessions(every).values():
+        a, b = out.get(tool, (0.0, 0))
+        out[tool] = (a + secs, b + tok)
+    return out
+
+
+def today_sessions(every=60):
+    """{session id: (tool, agent_seconds, tokens)} for today."""
     now = time.time()
     if now - STATS_AT[0] >= every:
         STATS_AT[0] = now
@@ -1225,11 +1234,9 @@ def today_stats(every=60):
                                 _scan(f, "chatgpt", "codex", midnight)
                         except OSError:
                             pass
-    out = {}
-    for st in STATS.values():
-        secs, tok = out.get(st["tool"], (0.0, 0))
-        out[st["tool"]] = (secs + st["secs"], tok + st["tokens"])
-    return out
+    midnight = _midnight()  # logs untouched since yesterday still hold yesterday's totals
+    return {session_id(p): (st["tool"], st["secs"], st["tokens"])
+            for p, st in STATS.items() if st["day"] == midnight}
 
 
 def human_tokens(n):
@@ -1894,7 +1901,7 @@ def my_today(cfg, live):
             if g and g["commits_today"]:
                 commits[p] = g["commits_today"]
     return {"day": date.today().isoformat(),
-            "tools": {t: [round(v[0]), v[1]] for t, v in today_stats().items()},
+            "sessions": {sid: [tool, round(secs), tok] for sid, (tool, secs, tok) in today_sessions().items()},
             "commits": commits}
 
 
@@ -1912,19 +1919,24 @@ def note_peer_today(peers):
 
 
 def all_today_stats():
-    """today_stats() with every linked computer's agent time and tokens added."""
-    out = dict(today_stats())
+    """today_stats() with every linked computer's agent time and tokens added.
+    A session two computers both read counts once (the larger copy)."""
+    sessions = dict(today_sessions())
     today = date.today().isoformat()
     for t in PEER_TODAY.values():
-        if t.get("day") != today:
+        if t.get("day") != today or not isinstance(t.get("sessions"), dict):
             continue
-        for tool, v in (t.get("tools") or {}).items():
+        for sid, v in t["sessions"].items():
             try:
-                secs, tok = float(v[0]), int(v[1])
+                tool, secs, tok = str(v[0]), float(v[1]), int(v[2])
             except (TypeError, ValueError, IndexError):
                 continue
-            a, b = out.get(tool, (0.0, 0))
-            out[tool] = (a + secs, b + tok)
+            have = sessions.get(sid)
+            sessions[sid] = (tool, max(secs, have[1]), max(tok, have[2])) if have else (tool, secs, tok)
+    out = {}
+    for tool, secs, tok in sessions.values():
+        a, b = out.get(tool, (0.0, 0))
+        out[tool] = (a + secs, b + tok)
     return out
 
 
@@ -2207,47 +2219,65 @@ CLOUD_SESSION = re.compile(r"claude\.ai/code/(session_[A-Za-z0-9_-]+)")
 CLOUD_SECONDS = 900  # a cloud session shows as working this long after its last push
 
 
+CLOUD = {"agents": [], "at": 0.0, "busy": False}
+
+
 def cloud_agents(cfg):
-    """[agent] for the cloud sessions that pushed to your GitHub repos lately."""
+    """[agent] for the cloud sessions that pushed to your GitHub repos lately.
+    Fetched in the background every 2 minutes, so a slow GitHub never holds up
+    the cards; this returns the last result."""
     if not cfg.get("cloud_agents", True):
         return []
+    if time.time() - CLOUD["at"] >= 120 and not CLOUD["busy"]:
+        import threading
+        CLOUD["at"], CLOUD["busy"] = time.time(), True
 
-    def fetch():
-        token = github_token(cfg)
-        if not token:
-            return []
-        try:
-            login = cached(CACHE, ("login", token[-6:]), 86400,
-                           lambda: github_call(token, "GET", "/user").get("login"))
-            events = github_call(token, "GET", f"/users/{login}/events?per_page=40") if login else []
-        except Exception as e:
-            log("cloud: can't read your GitHub activity:", repr(e))
-            return []
-        found = {}
-        for e in events if isinstance(events, list) else []:
-            t = iso_time(e.get("created_at"))
-            if e.get("type") != "PushEvent" or not t or time.time() - t > CLOUD_SECONDS:
-                continue
-            repo, pl = (e.get("repo") or {}).get("name", ""), e.get("payload") or {}
-            msgs = [c.get("message", "") for c in pl.get("commits") or []]
-            if not msgs and pl.get("head") and repo:
+        def go():
+            try:
+                CLOUD["agents"] = fetch_cloud_agents(cfg)
+            except Exception as e:  # never let GitHub being down touch the cards
+                log("cloud:", repr(e))
+            finally:
+                CLOUD["busy"] = False
+        threading.Thread(target=go, daemon=True).start()
+    return [a for a in CLOUD["agents"] if time.time() - a["mtime"] < CLOUD_SECONDS]
+
+
+def fetch_cloud_agents(cfg):
+    """cloud_agents(), asked of GitHub now (blocking)."""
+    token = github_token(cfg)
+    if not token:
+        return []
+    try:
+        login = cached(CACHE, ("login", token[-6:]), 86400,
+                       lambda: github_call(token, "GET", "/user").get("login"))
+        events = github_call(token, "GET", f"/users/{login}/events?per_page=40") if login else []
+    except Exception as e:
+        log("cloud: can't read your GitHub activity:", repr(e))
+        return []
+    found = {}
+    for e in events if isinstance(events, list) else []:
+        t = iso_time(e.get("created_at"))
+        if e.get("type") != "PushEvent" or not t or time.time() - t > CLOUD_SECONDS:
+            continue
+        repo, pl = (e.get("repo") or {}).get("name", ""), e.get("payload") or {}
+        msgs = [c.get("message", "") for c in pl.get("commits") or []]
+        if not msgs and pl.get("head") and repo:
+            try:
                 msgs = [cached(CACHE, ("commit-msg", repo, pl["head"]), 86400, lambda: (github_call(
                     token, "GET", f"/repos/{repo}/commits/{pl['head']}").get("commit") or {}).get("message", ""))]
-            for msg in msgs:
-                m = CLOUD_SESSION.search(msg or "")
-                if m and (m.group(1) not in found or found[m.group(1)]["mtime"] < t):
-                    found[m.group(1)] = {
-                        "tool": "claude", "status": "busy", "action": "☁️ working in the cloud",
-                        "project": repo.split("/")[-1] or None, "public": bool(e.get("public")),
-                        "model": None, "mtime": t, "cwd": None, "branch": None, "machine": "☁️ Cloud",
-                        "sid": session_id(m.group(1)), "cloud": True,
-                        "outcome": {"kind": "push", "ok": True, "t": t}}
-        return sorted(found.values(), key=lambda a: -a["mtime"])[:6]
-    try:
-        return cached(CACHE, ("cloud",), 120, fetch)
-    except Exception as e:  # never let GitHub being down touch the cards
-        log("cloud:", repr(e))
-        return []
+            except Exception:
+                continue
+        for msg in msgs:
+            m = CLOUD_SESSION.search(msg or "")
+            if m and (m.group(1) not in found or found[m.group(1)]["mtime"] < t):
+                found[m.group(1)] = {
+                    "tool": "claude", "status": "busy", "action": "☁️ working in the cloud",
+                    "project": repo.split("/")[-1] or None, "public": bool(e.get("public")),
+                    "model": None, "mtime": t, "cwd": None, "branch": None, "machine": "☁️ Cloud",
+                    "sid": session_id(m.group(1)), "cloud": True,
+                    "outcome": {"kind": "push", "ok": True, "t": t}}
+    return sorted(found.values(), key=lambda a: -a["mtime"])[:6]
 
 
 def add_cloud(live, cloud):
@@ -2330,7 +2360,7 @@ def _blank_day():
     return {"active_minutes": 0, "agent_minutes": 0, "max_parallel": 0, "hours": [0] * 24,
             "sessions": [], "tools": {}, "projects": {}, "machines": {}, "models": {},
             "outcomes": {}, "commits": {}, "tokens": 0, "agent_seconds": 0, "seen": [],
-            "act": [], "par": [], "cloud": [], "u": 0}
+            "act": [], "par": [], "cloud": [], "u": 0, "sess": {}, "bm": {}}
 
 
 def _run_add(runs, minute, n=None):
@@ -2395,14 +2425,25 @@ def merge_days(recs):
         hours[time.localtime(m * 60).tm_hour] += 1
     out["hours"] = [max([hours[h]] + [r["hours"][h] for r in recs if len(r["hours"]) == 24])
                     for h in range(24)]
-    par = {}
+    # Agents with a session ID (Claude, Codex) count once per session, however
+    # many computers logged them; the rest (found by process) add up.
+    named = {}  # session -> busy minutes
+    par = dict(cloud)
+    unnamed_minutes = 0
     for r in recs:
+        mine = {}
+        for sid, runs in r["bm"].items():
+            for m in _run_minutes(runs):
+                mine[m] = mine.get(m, 0) + 1
+                named.setdefault(sid, set()).add(m)
+        unnamed_minutes += max(0, r["agent_minutes"] - sum(mine.values()))
         for m, n in _run_minutes(r["par"]).items():
-            par[m] = par.get(m, 0) + n
-    for m, n in cloud.items():
-        par[m] = par.get(m, 0) + n
+            par[m] = par.get(m, 0) + max(0, n - mine.get(m, 0))
+    for minutes in named.values():
+        for m in minutes:
+            par[m] = par.get(m, 0) + 1
     out["max_parallel"] = max([max(par.values(), default=0)] + [r["max_parallel"] for r in recs])
-    out["agent_minutes"] = sum(r["agent_minutes"] for r in recs) + sum(cloud.values())
+    out["agent_minutes"] = sum(len(v) for v in named.values()) + unnamed_minutes + sum(cloud.values())
     out["sessions"] = _merge_sessions([x for r in recs for x in r["sessions"]]
                                       + [[a, b] for a, b in _to_runs(cloud)])
     for key in ("tools", "projects", "machines", "models", "outcomes"):
@@ -2415,8 +2456,15 @@ def merge_days(recs):
     for r in recs:
         for k, v in r["commits"].items():
             out["commits"][k] = max(out["commits"].get(k, 0), v)
-    out["tokens"] = sum(r["tokens"] for r in recs)
-    out["agent_seconds"] = sum(r["agent_seconds"] for r in recs)
+    sess, extra_secs, extra_tok = {}, 0, 0
+    for r in recs:
+        for sid, (secs, tok) in r["sess"].items():
+            a = sess.get(sid, (0, 0))
+            sess[sid] = (max(a[0], secs), max(a[1], tok))
+        extra_secs += max(0, r["agent_seconds"] - sum(v[0] for v in r["sess"].values()))
+        extra_tok += max(0, r["tokens"] - sum(v[1] for v in r["sess"].values()))
+    out["tokens"] = sum(v[1] for v in sess.values()) + extra_tok
+    out["agent_seconds"] = sum(v[0] for v in sess.values()) + extra_secs
     out["act"] = _to_runs(act)
     out["u"] = max(r["u"] for r in recs)
     return out
@@ -2430,6 +2478,16 @@ def _clean_day(rec):
     for k, v in out.items():
         got = rec.get(k, v)
         if k == "seen":
+            continue
+        if k in ("sess", "bm"):
+            if isinstance(got, dict):
+                for sid, v in list(got.items())[:500]:
+                    if k == "sess" and isinstance(v, list) and len(v) == 2 and \
+                            all(isinstance(y, int) for y in v):
+                        out[k][str(sid)[:32]] = v
+                    elif k == "bm" and isinstance(v, list):
+                        out[k][str(sid)[:32]] = [x for x in v if isinstance(x, list) and len(x) == 2
+                                                 and all(isinstance(y, int) for y in x)][:200]
             continue
         if isinstance(v, int) and isinstance(got, (int, float)) and not isinstance(got, bool):
             out[k] = int(got)
@@ -2626,6 +2684,9 @@ class Habits:
             _run_add(rec["act"], minute)
         if busy:
             _run_add(rec["par"], minute, len(busy))
+        for _, a in busy:  # per session, so one two computers both see counts once
+            if a.get("sid"):
+                _run_add(rec["bm"].setdefault(a["sid"], []), minute)
         if cloud:
             _run_add(rec["cloud"], minute, cloud)
         rec["u"] = round(now)
@@ -2647,9 +2708,10 @@ class Habits:
                     k = f"{o['kind']}_{'pass' if o['ok'] else 'fail'}"
                     rec["outcomes"][k] = rec["outcomes"].get(k, 0) + 1
         rec["seen"] = sorted(seen)[-300:]
-        stats = today_stats()
-        rec["tokens"] = max(rec["tokens"], sum(v[1] for v in stats.values()))
-        rec["agent_seconds"] = max(rec["agent_seconds"], int(sum(v[0] for v in stats.values())))
+        sessions = today_sessions()
+        rec["sess"] = {sid: [round(secs), tok] for sid, (_, secs, tok) in sessions.items()}
+        rec["tokens"] = max(rec["tokens"], sum(v[2] for v in sessions.values()))
+        rec["agent_seconds"] = max(rec["agent_seconds"], int(sum(v[1] for v in sessions.values())))
         for s in live.values():
             for p, root in s["roots"].items():
                 g = git_stats(root)
