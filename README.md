@@ -87,7 +87,7 @@ git clone https://github.com/abelxmendoza/discord-agent-presence && ./discord-ag
 | `agent-presence run` | Runs in the foreground |
 | `agent-presence link` / `link <key>` / `link --off` | Shares one card across your computers |
 | `agent-presence web setup [--readme]` / `web preview` / `web off` | Publishes your status for a README card and website widget |
-| `agent-presence stats [--html]` | Your coding habits, private to this computer |
+| `agent-presence stats [--html]` | Your coding habits across your linked computers (private) |
 | `agent-presence machines` | Shows this computer, your linked ones, and which one has the card |
 
 | | Linux | macOS | Windows |
@@ -118,7 +118,7 @@ or VS Code window titles are missed. `agent-presence doctor` tells you.
 - **Git.** Branch and uncommitted +/− lines for the top project, commits today.
 - **Today's stats.** Agent time and tokens since midnight. Tokens count new
   work (input + output + cache writes), not cache re-reads.
-- **Streak, model and CI.** Days in a row with commits or an active card, the
+- **Streak, model and CI.** Days in a row you coded or committed (on any linked computer), the
   model in use, and GitHub CI status (public repos only).
 - **Milestones.** For 10 minutes after they happen: 🎉 PR #42 merged,
   🏆 100th commit this month, 🏆 10th commit today, 🔥 new record: 12-day streak.
@@ -177,8 +177,9 @@ link key, so others on the network can't read it or post to your card. (Update
 all your linked computers together: older versions sent it unencrypted and
 can't read the new packets.) The first time, macOS asks to allow Python
 to find devices on your local network, and Windows asks to allow it through
-the firewall: say yes. Git lines, streaks and today's tokens come from the
-computer showing the card. Linux reads keyboard/mouse idle time with
+the firewall: say yes. Today's agent time, tokens and commits, the streak
+and `agent-presence stats` add up every linked computer (see
+[combined stats](#combined-across-your-computers)). Linux reads keyboard/mouse idle time with
 `xprintidle` if installed (`sudo apt install xprintidle`); without it the card
 falls back to whichever Linux machine has the busiest agents.
 
@@ -195,11 +196,49 @@ overwrite each other, and every computer's agents count on it. Set
 
 ### Your coding habits (private)
 
-While it runs, it keeps a log of your habits on this computer only
+While it runs, it keeps a log of your habits
 (`~/.local/state/ai-presence/habits/`, one small file per month): minutes
 coding per hour and day, sessions, projects, tools, models, machines, how many
 agents ran at once, test and build results, commits, tokens and agent time.
-Nothing in it is ever published.
+Nothing in it is ever published; linked computers swap it with each other,
+encrypted with the link key.
+
+#### Combined across your computers
+
+With your computers linked, each one sends its log to the others (every 30
+seconds on the same network, every 10 minutes through the web repo relay on
+other networks), and keeps theirs so it still counts while they're off. The
+numbers are merged, not just added:
+
+- **Coding time** counts each minute once: an hour at the Mac while the PC is
+  also busy is one hour, not two.
+- **Agent time, agent minutes and tokens** add up, since they're different
+  agents. A session two computers both see (Windows reading WSL while
+  agent-presence also runs inside WSL) counts once.
+- **Most agents at once** adds up what each computer ran in the same minute.
+- **Commits** take each repo's highest count, since a repo cloned on two
+  computers sees the same commits.
+- **Streak** counts a day when you coded on any of them.
+
+#### From your phone
+
+The Claude app on your phone can start Claude Code sessions that run in the
+cloud. They leave nothing on your computers, but every commit they push ends
+with a `Claude-Session: https://claude.ai/code/session_…` line. So any of your
+computers that has a GitHub token (`gh auth login`, or `web setup`) checks your
+recent pushes every 2 minutes and shows each such session as
+`☁️ working in the cloud` for 15 minutes after it pushes. Those minutes count
+toward coding time and the streak too, once, however many computers see them.
+It has limits worth knowing:
+
+- A computer has to be running agent-presence (and Discord, for the Discord
+  card); Discord can't show a card from the phone app.
+- Only sessions that push commits show, and GitHub can take a few minutes to
+  list a push. Chatting in the Claude app without code can't be seen at all.
+- A session you start from your phone with Remote Control runs on your
+  computer, so it's counted like any other there.
+
+Set `cloud_agents: false` to turn this off.
 
 ```
 $ agent-presence stats
@@ -315,6 +354,7 @@ Presence apps* on.
 | `machine_name` | `""` | What to call this computer; blank = its model |
 | `web` | off | `enabled`, `repo`, `branch`, `name`, `relay`, `live`, `share`, `show_tokens`, `show_files`, `show_machines`, `every_seconds` for the README card and website widget |
 | `link_key` | `""` | Same key on each computer = one shared card (`agent-presence link`) |
+| `cloud_agents` | `true` | Show Claude Code cloud sessions (from your phone) via their pushes |
 | `show_project`, `show_git`, `show_stats`, `show_streak`, `show_model`, `show_ci`, `show_milestones` | `true` | Turn each line on or off |
 | `show_actions` | `true` | What each agent is doing, and test/build results (off in `"minimal"`) |
 | `show_files` | `false` | "editing foo.py" instead of "editing". Names like `.env`, `id_rsa`, `*.pem` or `secrets.yaml` are never shown |

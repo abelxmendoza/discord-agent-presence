@@ -81,6 +81,10 @@ DEFAULT_CONFIG = {
     # Same key on each of your computers = they share one card that follows
     # whichever one you're using. Set with `agent-presence link`.
     "link_key": "",
+    # Show Claude Code sessions running in the cloud (started from the Claude
+    # app on your phone, or claude.ai/code), seen through the commits they push
+    # to your GitHub repos. Needs a GitHub token (`gh auth login`).
+    "cloud_agents": True,
     # Publish what you're doing to GitHub for a README card and a website
     # widget, with more detail than Discord shows. Set up with
     # `agent-presence web setup`.
@@ -957,6 +961,14 @@ def wsl_path(root, path):
     return root + path.replace("/", "\\")
 
 
+def session_id(f):
+    """A short, path-free ID for one agent session, so a session two computers
+    both see (Windows reading WSL, and agent-presence running inside WSL too)
+    counts once."""
+    import hashlib
+    return hashlib.sha256(Path(f).stem.encode()).hexdigest()[:12]
+
+
 def gather_agents(cfg, procs=None):
     now = time.time()
     keep = now - max(cfg["agent_active_seconds"], cfg["agent_waiting_seconds"])
@@ -991,6 +1003,7 @@ def gather_agents(cfg, procs=None):
                     continue
                 if m >= keep:
                     a = claude_agent(f, m, cfg)
+                    a["sid"] = session_id(f)
                     if now - sub_m < 60 and a["status"] == "waiting":
                         # Background subagents still working after the turn ended.
                         a["status"], a["action"] = "busy", "🤖 directing a subagent"
@@ -1006,6 +1019,7 @@ def gather_agents(cfg, procs=None):
                         continue
                     if m >= keep:
                         a = codex_agent(f, m, cfg)
+                        a["sid"] = session_id(f)
                         if wanted(a):
                             found.append(a)
         for a in found:
@@ -1108,6 +1122,8 @@ def ci_status(slug, branch):
 # --------------------------------------------------------------- streak ----
 
 def update_streak(live_today, roots):
+    """Days in a row you coded, on any of your computers. A day counts when an
+    agent ran or you were in a coding app, or you committed to one of these repos."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     path = STATE_DIR / "days.json"
     try:
@@ -1115,18 +1131,15 @@ def update_streak(live_today, roots):
     except (OSError, json.JSONDecodeError):
         days = set()
     today = date.today().isoformat()
-    if live_today and today not in days:
-        days.add(today)
-        path.write_text(json.dumps(sorted(days)))
-    for r in roots:
-        days |= commit_days(r)
-    d, streak = date.today(), 0
-    if today not in days:  # streak still counts until you miss a whole day
-        d -= timedelta(days=1)
-    while d.isoformat() in days:
-        streak += 1
-        d -= timedelta(days=1)
-    return streak
+    mine = set(days)
+    if live_today:
+        mine.add(today)
+    for r in roots:  # kept, so linked computers without these repos count them too
+        mine |= {d for d in commit_days(r) if d >= (date.today() - timedelta(days=120)).isoformat()}
+    if mine != days:
+        path.write_text(json.dumps(sorted(mine)))
+    every = mine | cached(CACHE, ("streak-days",), 60, lambda: own_streak_days() | peer_streak_days())
+    return _streaks(every)[0]
 
 
 # ---------------------------------------------------------- today stats ----
@@ -1556,7 +1569,7 @@ def card_lines(cfg, tool, s, streak, machines=None, switched=None):
 
     # 3b. Agent time and tokens today for this app.
     if cfg["show_stats"]:
-        stats = today_stats()
+        stats = all_today_stats()
         secs = sum(stats.get(t, (0, 0))[0] for t in s.get("tools", [tool]))
         tok = sum(stats.get(t, (0, 0))[1] for t in s.get("tools", [tool]))
         bits = []
@@ -1578,7 +1591,7 @@ def card_lines(cfg, tool, s, streak, machines=None, switched=None):
     bits = []
     if cfg["show_streak"] and streak >= 2:
         bits.append(f"🔥 {streak}-day streak")
-    commits = sum(git_stats(r)["commits_today"] for p, r in s["roots"].items() if p not in hidden)
+    commits = sum(all_commits_today(s, hidden).values())
     if commits and cfg["show_stats"]:
         bits.append(f"📦 {plural(commits, 'commit')} today")
     if bits:
@@ -1685,6 +1698,9 @@ SWITCH_MARGIN = 15       # hysteresis before the card moves to another machine
 RELAY_PREFIX = "agent-presence-peer-"  # one branch per computer in the web repo
 RELAY_SECONDS = 30       # how often the relay writes this computer's packet
 RELAY_TTL = 150          # a relayed packet older than this is ignored
+RELAY_HABITS_PREFIX = "agent-presence-habits-"  # each computer's habit records, sealed
+RELAY_HABIT_SECONDS = 600
+HABIT_SHARE_SECONDS = 30  # how often linked computers on one network swap habit records
 _machine = {}
 
 
@@ -1854,7 +1870,7 @@ def machine_status(cfg, live):
                            "project": None if proj in hidden else proj,
                            "public": bool(slug and github_public(slug)),
                            "model": a.get("model"), "mtime": a["mtime"],
-                           "outcome": a.get("outcome")})
+                           "outcome": a.get("outcome"), "sid": a.get("sid")})
     agents.sort(key=lambda a: -a["mtime"])
     tools = {t: {"running_since": s["running_since"], "focused": s["focused"],
                  "projects": [p for p in s["projects"] if p not in hidden][:4]}
@@ -1864,7 +1880,70 @@ def machine_status(cfg, live):
             "chip": m["chip"], "kind": m["kind"], "os": m["os"], "os_full": m["os_full"],
             "idle": None if idle is None else round(idle, 1), "discord": discord_running(),
             "web": bool(web_cfg(cfg)["enabled"] and web_cfg(cfg)["repo"]),
-            "agents": agents[:12], "tools": tools}
+            "agents": agents[:12], "tools": tools, "today": my_today(cfg, live)}
+
+
+def my_today(cfg, live):
+    """This computer's agent time, tokens and commits so far today, for the
+    computer showing the card to add to its own."""
+    hidden = set(cfg["hide_projects"])
+    commits = {}
+    for s in live.values():
+        for p, root in s["roots"].items():
+            g = git_stats(root) if p not in hidden else None
+            if g and g["commits_today"]:
+                commits[p] = g["commits_today"]
+    return {"day": date.today().isoformat(),
+            "tools": {t: [round(v[0]), v[1]] for t, v in today_stats().items()},
+            "commits": commits}
+
+
+PEER_TODAY = {}  # machine id -> its my_today(), kept after it goes quiet until midnight
+
+
+def note_peer_today(peers):
+    today = date.today().isoformat()
+    for p in peers:
+        t = p.get("today")
+        if isinstance(t, dict) and t.get("day") == today:
+            PEER_TODAY[p["id"]] = t
+    for k in [k for k, t in PEER_TODAY.items() if t.get("day") != today]:
+        del PEER_TODAY[k]
+
+
+def all_today_stats():
+    """today_stats() with every linked computer's agent time and tokens added."""
+    out = dict(today_stats())
+    today = date.today().isoformat()
+    for t in PEER_TODAY.values():
+        if t.get("day") != today:
+            continue
+        for tool, v in (t.get("tools") or {}).items():
+            try:
+                secs, tok = float(v[0]), int(v[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            a, b = out.get(tool, (0.0, 0))
+            out[tool] = (a + secs, b + tok)
+    return out
+
+
+def all_commits_today(s, hidden):
+    """{project: commits today} across your computers. The same repo cloned on
+    two of them sees the same commits, so each project takes the highest count."""
+    out = {}
+    for p, r in s["roots"].items():
+        g = git_stats(r) if p not in hidden else None
+        if g and g["commits_today"]:
+            out[p] = g["commits_today"]
+    today = date.today().isoformat()
+    for t in PEER_TODAY.values():
+        if t.get("day") != today:
+            continue
+        for p, n in (t.get("commits") or {}).items():
+            if p not in hidden and isinstance(n, int):
+                out[p] = max(out.get(p, 0), n)
+    return out
 
 
 class Sealer:
@@ -1910,6 +1989,7 @@ class Link:
         self.box = Sealer(key, "link")
         self.port, self.target = port, target
         self.peers = {}  # id -> (received_at, packet)
+        self.inbox = []  # habit records from linked computers (see save_peer_habits)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         if hasattr(socket, "SO_REUSEPORT"):
@@ -1951,7 +2031,10 @@ class Link:
                 break
             pkt = self.open(data)
             if pkt and pkt.get("id") and pkt["id"] != my_id:
-                self.peers[pkt["id"]] = (time.time(), pkt)
+                if pkt.get("kind") == "habits":
+                    self.inbox.append(pkt)
+                else:
+                    self.peers[pkt["id"]] = (time.time(), pkt)
         now = time.time()
         self.peers = {k: v for k, v in self.peers.items() if now - v[0] < PEER_TTL}
         return [p for _, p in self.peers.values()]
@@ -1974,7 +2057,8 @@ class Relay:
         self.cfg, self.repo = cfg, web_cfg(cfg)["repo"]
         self.peers = {}  # id -> packet
         self.seen = {}   # branch -> commit already read
-        self.last_at, self.busy = 0, threading.Lock()
+        self.inbox = []  # habit records from linked computers
+        self.last_at, self.habits_at, self.busy = 0, 0, threading.Lock()
         self.thread_cls = threading.Thread
 
     def seal(self, packet):
@@ -2012,17 +2096,39 @@ class Relay:
             if pkt and pkt["id"] != me["id"]:
                 self.peers[pkt["id"]] = pkt
 
-    def update(self, me):
-        """sync() in the background, at most every RELAY_SECONDS."""
+    def sync_habits(self, packet, token):
+        """Write this computer's habit records, then read the others' (blocking)."""
+        import base64
+        publish_files(token, self.repo, RELAY_HABITS_PREFIX + packet["id"],
+                      {"habits.txt": self.seal(packet) + "\n"})
+        refs = github_call(token, "GET", f"/repos/{self.repo}/git/matching-refs/heads/{RELAY_HABITS_PREFIX}")
+        for ref in refs:
+            branch, sha = ref["ref"][len("refs/heads/"):], ref["object"]["sha"]
+            if branch == RELAY_HABITS_PREFIX + packet["id"] or self.seen.get(branch) == sha:
+                continue
+            got = github_call(token, "GET", f"/repos/{self.repo}/contents/habits.txt?ref={sha}")
+            self.seen[branch] = sha
+            pkt = self.open(base64.b64decode(got.get("content", "")).decode("ascii", "replace"))
+            if pkt and pkt["id"] != packet["id"] and pkt.get("kind") == "habits":
+                self.inbox.append(pkt)
+
+    def update(self, me, habits=None):
+        """sync() in the background, at most every RELAY_SECONDS; with `habits`
+        (a function returning habit_packet()), sync_habits() every RELAY_HABIT_SECONDS."""
         if time.time() - self.last_at < RELAY_SECONDS or not self.busy.acquire(blocking=False):
             return
         self.last_at = time.time()
+        share = habits is not None and time.time() - self.habits_at >= RELAY_HABIT_SECONDS
+        if share:
+            self.habits_at = time.time()
 
         def go():
             try:
                 token = github_token(self.cfg)
                 if token:
                     self.sync(me, token)
+                    if share:
+                        self.sync_habits(habits(), token)
                 else:
                     log("relay: no GitHub token; run `agent-presence web setup`")
             except Exception as e:
@@ -2058,7 +2164,9 @@ def pick_leader(me, peers, current=None, need="discord"):
 
 
 def merge_peers(live, peers):
-    """Add other machines' agents and open tools into this machine's snapshot."""
+    """Add other machines' agents and open tools into this machine's snapshot.
+    A session two machines both report (same session ID) is counted once."""
+    seen = {a["sid"] for s in live.values() for a in s["agents"] if a.get("sid")}
     for p in peers:
         label = p.get("name") or p.get("model") or "another computer"
         for tool, t in p.get("tools", {}).items():
@@ -2071,9 +2179,89 @@ def merge_peers(live, peers):
                 if proj not in s["projects"]:
                     s["projects"].append(proj)
         for a in p.get("agents", []):
+            if a.get("sid") and a["sid"] in seen:
+                continue
             if a.get("tool") in TOOLS and a["tool"] in live:
                 live[a["tool"]]["agents"].append({**a, "cwd": None, "branch": None,
                                                   "machine": label})
+                if a.get("sid"):
+                    seen.add(a["sid"])
+    return live
+
+
+def coding_now(live):
+    """You're coding right now: in a coding app, or an agent is running."""
+    return any(s["focused"] or s["agents"] for s in live.values())
+
+
+# ----------------------------------------------------------- cloud ----
+# Claude Code sessions that run in the cloud (started from the Claude app on
+# your phone, or claude.ai/code) leave nothing on your computers. What they do
+# leave is commits: each one ends with a "Claude-Session: https://claude.ai/
+# code/session_..." line. So any computer running this, with a GitHub token,
+# watches your recent pushes for those and puts the session on the card for a
+# while after each push. Chats in the Claude app that don't push code can't be
+# seen from anywhere.
+
+CLOUD_SESSION = re.compile(r"claude\.ai/code/(session_[A-Za-z0-9_-]+)")
+CLOUD_SECONDS = 900  # a cloud session shows as working this long after its last push
+
+
+def cloud_agents(cfg):
+    """[agent] for the cloud sessions that pushed to your GitHub repos lately."""
+    if not cfg.get("cloud_agents", True):
+        return []
+
+    def fetch():
+        token = github_token(cfg)
+        if not token:
+            return []
+        try:
+            login = cached(CACHE, ("login", token[-6:]), 86400,
+                           lambda: github_call(token, "GET", "/user").get("login"))
+            events = github_call(token, "GET", f"/users/{login}/events?per_page=40") if login else []
+        except Exception as e:
+            log("cloud: can't read your GitHub activity:", repr(e))
+            return []
+        found = {}
+        for e in events if isinstance(events, list) else []:
+            t = iso_time(e.get("created_at"))
+            if e.get("type") != "PushEvent" or not t or time.time() - t > CLOUD_SECONDS:
+                continue
+            repo, pl = (e.get("repo") or {}).get("name", ""), e.get("payload") or {}
+            msgs = [c.get("message", "") for c in pl.get("commits") or []]
+            if not msgs and pl.get("head") and repo:
+                msgs = [cached(CACHE, ("commit-msg", repo, pl["head"]), 86400, lambda: (github_call(
+                    token, "GET", f"/repos/{repo}/commits/{pl['head']}").get("commit") or {}).get("message", ""))]
+            for msg in msgs:
+                m = CLOUD_SESSION.search(msg or "")
+                if m and (m.group(1) not in found or found[m.group(1)]["mtime"] < t):
+                    found[m.group(1)] = {
+                        "tool": "claude", "status": "busy", "action": "☁️ working in the cloud",
+                        "project": repo.split("/")[-1] or None, "public": bool(e.get("public")),
+                        "model": None, "mtime": t, "cwd": None, "branch": None, "machine": "☁️ Cloud",
+                        "sid": session_id(m.group(1)), "cloud": True,
+                        "outcome": {"kind": "push", "ok": True, "t": t}}
+        return sorted(found.values(), key=lambda a: -a["mtime"])[:6]
+    try:
+        return cached(CACHE, ("cloud",), 120, fetch)
+    except Exception as e:  # never let GitHub being down touch the cards
+        log("cloud:", repr(e))
+        return []
+
+
+def add_cloud(live, cloud):
+    """Put cloud sessions on the card, unless a computer already reports them."""
+    seen = {a["sid"] for s in live.values() for a in s["agents"] if a.get("sid")}
+    for a in cloud:
+        if a["sid"] in seen:
+            continue
+        s = live.setdefault("claude", {"running_since": a["mtime"], "agents": [], "projects": [],
+                                       "roots": {}, "focused": False})
+        s["running_since"] = min(s["running_since"] or a["mtime"], a["mtime"])
+        s["agents"].append(dict(a))
+        if a["project"] and a["project"] not in s["projects"]:
+            s["projects"].append(a["project"])
     return live
 
 
@@ -2124,9 +2312,14 @@ def machine_lines(cfg, machines, switched=None):
 
 
 # ----------------------------------------------------------- habits ----
-# A private, local log of your coding habits: one record per day, sampled
-# once a minute. It never leaves this computer; `agent-presence stats` reads
-# it, and the web card only gets the highlights you choose to share.
+# A private log of your coding habits: one record per day, sampled once a
+# minute. Linked computers swap their records (encrypted with the link key)
+# so `agent-presence stats`, the streak and the web card count all of them;
+# the web card only gets the highlights you choose to share.
+#
+# Each record keeps its active minutes as runs ("act"), so when two
+# computers are in use at once that time counts once, while agent minutes,
+# tokens and agent time (different agents on each) add up.
 
 HABITS_DIR = STATE_DIR / "habits"
 SESSION_GAP = 15  # minutes without activity that end a session
@@ -2136,11 +2329,234 @@ WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", 
 def _blank_day():
     return {"active_minutes": 0, "agent_minutes": 0, "max_parallel": 0, "hours": [0] * 24,
             "sessions": [], "tools": {}, "projects": {}, "machines": {}, "models": {},
-            "outcomes": {}, "commits": {}, "tokens": 0, "agent_seconds": 0, "seen": []}
+            "outcomes": {}, "commits": {}, "tokens": 0, "agent_seconds": 0, "seen": [],
+            "act": [], "par": [], "cloud": [], "u": 0}
 
 
-def load_habits(days=None):
-    """{"YYYY-MM-DD": record} for the last `days` days (all when None)."""
+def _run_add(runs, minute, n=None):
+    """Add one minute to a list of [first, last] (or [first, last, n]) runs."""
+    if runs and runs[-1][1] >= minute:
+        return
+    if runs and runs[-1][1] == minute - 1 and (n is None or runs[-1][2] == n):
+        runs[-1][1] = minute
+    else:
+        runs.append([minute, minute] if n is None else [minute, minute, n])
+
+
+def _run_minutes(runs, cap=1440):
+    """{minute: n} from runs (n = 1 for plain runs)."""
+    out = {}
+    for r in runs:
+        try:
+            a, b, n = int(r[0]), int(r[1]), int(r[2]) if len(r) > 2 else 1
+        except (TypeError, ValueError, IndexError):
+            continue
+        for m in range(a, min(b, a + cap - 1) + 1):
+            out[m] = n
+    return out
+
+
+def _to_runs(minutes):
+    runs = []
+    for m in sorted(minutes):
+        _run_add(runs, m)
+    return runs
+
+
+def _merge_sessions(spans):
+    out = []
+    for a, b in sorted((int(x[0]), int(x[1])) for x in spans if len(x) >= 2):
+        if out and a - out[-1][1] <= SESSION_GAP:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return out
+
+
+def merge_days(recs):
+    """One day's records from several computers (and cloud sessions) as one.
+    Minutes you were active on two at once count once; agent minutes, tokens,
+    agent time and tool minutes add up; commits take each repo's highest count,
+    since a repo cloned on two computers sees the same commits."""
+    cloud = {}
+    for r in recs:
+        for m, n in _run_minutes(r["cloud"]).items():
+            cloud[m] = max(cloud.get(m, 0), n)
+    if len(recs) == 1 and not cloud:
+        return recs[0]
+    out = _blank_day()
+    act = set(cloud)
+    for r in recs:
+        act |= set(_run_minutes(r["act"]))
+    # Days recorded before "act" existed only have a total: never report less.
+    out["active_minutes"] = max([len(act)] + [r["active_minutes"] for r in recs])
+    hours = [0] * 24
+    for m in act:
+        hours[time.localtime(m * 60).tm_hour] += 1
+    out["hours"] = [max([hours[h]] + [r["hours"][h] for r in recs if len(r["hours"]) == 24])
+                    for h in range(24)]
+    par = {}
+    for r in recs:
+        for m, n in _run_minutes(r["par"]).items():
+            par[m] = par.get(m, 0) + n
+    for m, n in cloud.items():
+        par[m] = par.get(m, 0) + n
+    out["max_parallel"] = max([max(par.values(), default=0)] + [r["max_parallel"] for r in recs])
+    out["agent_minutes"] = sum(r["agent_minutes"] for r in recs) + sum(cloud.values())
+    out["sessions"] = _merge_sessions([x for r in recs for x in r["sessions"]]
+                                      + [[a, b] for a, b in _to_runs(cloud)])
+    for key in ("tools", "projects", "machines", "models", "outcomes"):
+        for r in recs:
+            for k, v in r[key].items():
+                out[key][k] = out[key].get(k, 0) + v
+    if cloud:
+        out["tools"]["claude"] = out["tools"].get("claude", 0) + len(cloud)
+        out["machines"]["☁️ Cloud"] = len(cloud)
+    for r in recs:
+        for k, v in r["commits"].items():
+            out["commits"][k] = max(out["commits"].get(k, 0), v)
+    out["tokens"] = sum(r["tokens"] for r in recs)
+    out["agent_seconds"] = sum(r["agent_seconds"] for r in recs)
+    out["act"] = _to_runs(act)
+    out["u"] = max(r["u"] for r in recs)
+    return out
+
+
+def _clean_day(rec):
+    """A day record from another computer, with anything malformed dropped."""
+    if not isinstance(rec, dict):
+        return None
+    out = _blank_day()
+    for k, v in out.items():
+        got = rec.get(k, v)
+        if k == "seen":
+            continue
+        if isinstance(v, int) and isinstance(got, (int, float)) and not isinstance(got, bool):
+            out[k] = int(got)
+        elif k == "hours" and isinstance(got, list) and len(got) == 24 and \
+                all(isinstance(x, int) for x in got):
+            out[k] = got
+        elif isinstance(v, list) and isinstance(got, list):
+            out[k] = [x for x in got if isinstance(x, list) and 2 <= len(x) <= 3
+                      and all(isinstance(y, int) for y in x)][:2000]
+        elif isinstance(v, dict) and isinstance(got, dict):
+            out[k] = {str(a)[:80]: int(b) for a, b in list(got.items())[:200]
+                      if isinstance(b, (int, float)) and not isinstance(b, bool)}
+    return out
+
+
+def _peer_file(pid):
+    safe = re.sub(r"[^A-Za-z0-9_-]", "", str(pid))[:64] or "unknown"
+    return HABITS_DIR / "peers" / f"{safe}.json"
+
+
+def save_peer_habits(pkt, my_id=None):
+    """Keep a linked computer's habit records (newest copy of each day wins),
+    so its history still counts while it's off."""
+    pid, days = pkt.get("id"), pkt.get("days")
+    if not pid or pid == my_id or not isinstance(days, dict):
+        return False
+    path = _peer_file(pid)
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    have = data.get("days") if isinstance(data.get("days"), dict) else {}
+    for d, rec in days.items():
+        rec = _clean_day(rec)
+        if not rec or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(d)):
+            continue
+        if rec["u"] >= (have.get(d) or {}).get("u", 0):
+            have[d] = rec
+    cutoff = (date.today() - timedelta(days=400)).isoformat()
+    streak_days = set(data.get("streak_days") or [])
+    streak_days |= {d for d in pkt.get("streak_days") or []
+                    if isinstance(d, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", d)}
+    data = {"name": str(pkt.get("name") or "")[:80], "seen": int(time.time()),
+            "days": {d: r for d, r in have.items() if d >= cutoff},
+            "streak_days": sorted(d for d in streak_days if d >= cutoff)}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, separators=(",", ":")))
+        tmp.replace(path)
+    except OSError as e:
+        log("habits: can't save a linked computer's:", e)
+        return False
+    return True
+
+
+def _peer_habit_files():
+    try:
+        return sorted((HABITS_DIR / "peers").glob("*.json"))
+    except OSError:
+        return []
+
+
+def peer_streak_days():
+    """Days your linked computers were active (or had your commits)."""
+    out = set()
+    for f in _peer_habit_files():
+        try:
+            out |= set(json.loads(f.read_text()).get("streak_days") or [])
+        except (OSError, ValueError, AttributeError, TypeError):
+            pass
+    return out
+
+
+def own_streak_days():
+    """Days this computer saw you code: active minutes, open agents, or commits."""
+    days = {d for d, r in load_habits(400, mine=True).items()
+            if r["active_minutes"] or r["commits"] or r["cloud"]}
+    try:
+        days |= set(json.loads((STATE_DIR / "days.json").read_text()))
+    except (OSError, ValueError, TypeError):
+        pass
+    return days
+
+
+def habit_packet(cfg, my_id, name, days=None):
+    """This computer's habit records to send to linked computers: `days` (a
+    list of dates; all of the last 45 when None), minus hidden projects."""
+    own = load_habits(45, mine=True)
+    hidden = set(cfg["hide_projects"])
+    out = {}
+    for d in (sorted(own) if days is None else days):
+        r = own.get(d)
+        if not r:
+            continue
+        r = {k: v for k, v in r.items() if k != "seen"}
+        r["projects"] = {k: v for k, v in r["projects"].items() if k not in hidden}
+        r["commits"] = {k: v for k, v in r["commits"].items() if k not in hidden}
+        out[d] = r
+    cutoff = (date.today() - timedelta(days=120)).isoformat()
+    return {"id": my_id, "kind": "habits", "name": name, "days": out,
+            "streak_days": sorted(d for d in own_streak_days() if d >= cutoff)}
+
+
+def load_habits(days=None, mine=False):
+    """{"YYYY-MM-DD": record} for the last `days` days (all when None), with
+    your linked computers' records merged in (just this computer's with mine)."""
+    out = _own_habits(days)
+    if mine:
+        return out
+    cutoff = (date.today() - timedelta(days=days - 1)).isoformat() if days else ""
+    by_day = {d: [r] for d, r in out.items()}
+    for f in _peer_habit_files():
+        try:
+            peer = json.loads(f.read_text()).get("days") or {}
+        except (OSError, ValueError, AttributeError):
+            continue
+        for d, rec in peer.items():
+            rec = _clean_day(rec) if d >= cutoff else None
+            if rec:
+                by_day.setdefault(d, []).append(rec)
+    return {d: merge_days(rs) for d, rs in sorted(by_day.items())}
+
+
+def _own_habits(days=None):
     out = {}
     if not HABITS_DIR.exists():
         return out
@@ -2178,7 +2594,9 @@ class Habits:
             rec.setdefault(k, v)
         return rec
 
-    def record(self, cfg, live, machine_label=None, now=None):
+    def record(self, cfg, live, machine_label=None, now=None, cloud=0):
+        """`cloud`: how many cloud sessions are working right now (see
+        cloud_agents); every computer notes them and merging counts them once."""
         now = now or time.time()
         minute = int(now // 60)
         if minute == self.minute:
@@ -2205,6 +2623,12 @@ class Habits:
                 rec["projects"][p] = rec["projects"].get(p, 0) + 1
             if machine_label:
                 rec["machines"][machine_label] = rec["machines"].get(machine_label, 0) + 1
+            _run_add(rec["act"], minute)
+        if busy:
+            _run_add(rec["par"], minute, len(busy))
+        if cloud:
+            _run_add(rec["cloud"], minute, cloud)
+        rec["u"] = round(now)
         rec["agent_minutes"] += len(busy)
         rec["max_parallel"] = max(rec["max_parallel"], len(busy))
         for _, a in busy:
@@ -2303,6 +2727,7 @@ def habit_summary(habits=None, today=None):
         active |= set(json.loads((STATE_DIR / "days.json").read_text()))
     except (OSError, ValueError):
         pass
+    active |= peer_streak_days()
     current, best = _streaks(active)
     hours, weekdays = [0] * 24, [0] * 7
     for d, r in window(30).items():
@@ -2333,7 +2758,8 @@ def cmd_stats(html=False):
         print("No habits recorded yet. They build up while agent-presence runs.")
         return
     t, w, m, a = s["today"], s["week"], s["month"], s["all"]
-    print(f"Coding habits since {s['first_day']} (private: stored only on this computer)\n")
+    print(f"Coding habits since {s['first_day']} (private: kept on your computers"
+          f"{', all ' + str(1 + len(_peer_habit_files())) + ' combined' if _peer_habit_files() else ''})\n")
     print(f"  streak        {plural(s['streak'], 'day')} (best {s['best_streak']})")
     for label, x in (("today", t), ("7 days", w), ("30 days", m), ("all time", a)):
         bits = [f"{_hours(x['active_minutes'])} coding", f"{_hours(x['agent_minutes'])} of agent work",
@@ -2400,7 +2826,7 @@ h2{{font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:#fb923c;m
 .cols{{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}}
 table{{width:100%;border-collapse:collapse}}td{{padding:6px 0;border-bottom:1px solid #232c44}}td:last-child{{text-align:right;color:#9aa4bd}}
 </style><main>
-<h1>My coding habits</h1><p>Private report from agent-presence, kept only on this computer. Since {_x(s['first_day'])}.</p>
+<h1>My coding habits</h1><p>Private report from agent-presence, kept only on your computers. Since {_x(s['first_day'])}.</p>
 <div class="ks">{kpis}</div>
 <h2>When I code (last 30 days)</h2><div class="hs">{cells}</div>
 <div class="hl"><span>12 AM</span><span>6 AM</span><span>12 PM</span><span>6 PM</span><span>11 PM</span></div>
@@ -2609,10 +3035,9 @@ def web_status(cfg, live, machines=None, streak=0, state=None, habits=None):
     if w["show_machines"]:
         out["machines"] = [{"label": x["label"], "icon": x["icon"], "os": x["os"], "agents": x["agents"]}
                            for x in machines or []]
-    stats = today_stats()
+    stats = all_today_stats()
     out["today"] = {"agent_seconds": int(sum(v[0] for v in stats.values())),
-                    "commits": sum(sum(g["commits_today"] for g in [git_stats(r)] if g)
-                                   for p, r in s["roots"].items() if p not in hidden)}
+                    "commits": sum(all_commits_today(s, hidden).values())}
     if w["show_tokens"]:
         out["today"]["tokens"] = sum(v[1] for v in stats.values())
     try:
@@ -2932,7 +3357,7 @@ def activities(cfg, tick, live=None, own=None, machines=None, switched=None):
     own = set(client_ids(cfg)) - {"combined"} if own is None else own
     roots = {r for s in live.values() for p, r in s["roots"].items()
              if p not in cfg["hide_projects"]}
-    streak = update_streak(bool(live), roots) if cfg["show_streak"] else 0
+    streak = update_streak(coding_now(live), roots) if cfg["show_streak"] else 0
     totals = {"agents": sum(len(s["agents"]) for s in live.values()), "tools": len(live)}
     cards = plan_cards(cfg, live, own)
     if machines is None:
@@ -3001,23 +3426,40 @@ leader_is_me = {}
 def _loop(cfg, conns, link, web, relay=None):
     leader, web_leader, switched_at, switched_from = None, None, 0, None
     habits = Habits()
+    shared_at, rotation = 0, 0
     while True:
         tick = int(time.time() // cfg["rotate_seconds"])
         try:
             live = snapshot(cfg)
             me = machine_status(cfg, live)
-            try:  # this computer's own activity only, before other machines' is merged in
-                habits.record(cfg, live, me["name"] or me["model"])
+            label = me["name"] or me["model"]
+            cloud = cloud_agents(cfg)
+            try:  # this computer's own activity only; linked ones send their own (habit_packet)
+                habits.record(cfg, live, label,
+                              cloud=sum(a["status"] == "busy" for a in cloud))
             except Exception as e:
                 log("habits:", repr(e))
             peers = []
             if link:
                 link.send(me)
+                if time.time() - shared_at >= HABIT_SHARE_SECONDS:
+                    # Today every time, plus one older day in turn, so a computer
+                    # that just joined gets the whole history within ~20 minutes.
+                    shared_at = time.time()
+                    older = sorted(_own_habits(45), reverse=True)[1:]
+                    days = [date.today().isoformat()] + ([older[rotation % len(older)]] if older else [])
+                    rotation += 1
+                    for d in days:
+                        link.send(habit_packet(cfg, me["id"], label, [d]))
                 peers = link.receive(me["id"])
             if relay:  # computers on other networks; the local packet wins when both arrive
-                relay.update(me)
+                relay.update(me, lambda: habit_packet(cfg, me["id"], label))
                 near = {p["id"] for p in peers}
                 peers += [p for p in relay.receive(me["id"]) if p["id"] not in near]
+            for box in (link, relay):
+                while box and box.inbox:
+                    save_peer_habits(box.inbox.pop(0), me["id"])
+            note_peer_today(peers)
             new_leader = pick_leader(me, peers, leader)
             if new_leader != leader:
                 if leader and new_leader == me["id"]:
@@ -3035,14 +3477,14 @@ def _loop(cfg, conns, link, web, relay=None):
                 machines = machines_summary(me, peers, cfg)
                 here = next(m["label"] for m in machines if m["me"])
                 switched = here if time.time() - switched_at < 120 and switched_from else None
-                live = merge_peers(live, peers)
+                live = add_cloud(merge_peers(live, peers), cloud)
                 if leader == me["id"]:
                     acts, cards = activities(cfg, tick, live, set(conns) - {"combined"},
                                              machines, switched)
                 if publish:
                     roots = {r for st in live.values() for p, r in st["roots"].items()
                              if p not in cfg["hide_projects"]}
-                    web.update(web_status(cfg, live, machines, update_streak(bool(live), roots)
+                    web.update(web_status(cfg, live, machines, update_streak(coding_now(live), roots)
                                           if cfg["show_streak"] else 0))
         except Exception as e:  # never let a parsing hiccup kill the cards
             log("snapshot failed:", repr(e))
@@ -3500,7 +3942,7 @@ def cli():
     lp.add_argument("--off", action="store_true", help="stop sharing")
     lp.add_argument("--print-key", action="store_true", help="print only the key (made if needed)")
     sub.add_parser("machines", help="show this computer and your linked ones")
-    stp = sub.add_parser("stats", help="your coding habits (private, from this computer)")
+    stp = sub.add_parser("stats", help="your coding habits across your linked computers (private)")
     stp.add_argument("--html", action="store_true", help="open a private report in your browser")
     wp = sub.add_parser("web", help="show your activity on your GitHub README and website")
     wp.add_argument("action", nargs="?", default="setup", choices=["setup", "status", "preview", "off"])

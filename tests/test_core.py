@@ -542,6 +542,201 @@ def date_today():
     return date.today().isoformat()
 
 
+class CrossDevice(unittest.TestCase):
+    """Stats from several linked computers (and cloud sessions) combine correctly."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.saved = ap.HABITS_DIR, ap.STATE_DIR, dict(ap.PEER_TODAY)
+        ap.STATE_DIR = self.tmp / "state"
+        ap.HABITS_DIR = ap.STATE_DIR / "habits"
+        ap.CACHE.clear()
+
+    def tearDown(self):
+        ap.HABITS_DIR, ap.STATE_DIR = self.saved[:2]
+        ap.PEER_TODAY.clear()
+        ap.PEER_TODAY.update(self.saved[2])
+        ap.CACHE.clear()
+
+    def live(self, n=1, sid="s"):
+        return {"claude": {"running_since": time.time(), "focused": False, "projects": ["omega"],
+                           "roots": {}, "agents": [{"tool": "claude", "status": "busy", "action": "✍ editing",
+                                                    "project": "omega", "model": None, "mtime": time.time(),
+                                                    "outcome": None, "sid": f"{sid}{i}"} for i in range(n)]}}
+
+    def base(self):
+        base = (int(time.time() // 60) - 120) * 60
+        if time.localtime(base).tm_yday != time.localtime().tm_yday:
+            self.skipTest("too close to midnight")
+        return base
+
+    def record_on(self, folder, minutes, n=1, label="PC", cloud=0):
+        """Record `minutes` (offsets from base) as if on another computer."""
+        keep = ap.HABITS_DIR
+        ap.HABITS_DIR = folder
+        try:
+            h = ap.Habits()
+            for i in minutes:
+                h.record(ap.DEFAULT_CONFIG, self.live(n) if n else {}, label, self.b + i * 60, cloud=cloud)
+            return ap.habit_packet(ap.DEFAULT_CONFIG, label.lower(), label)
+        finally:
+            ap.HABITS_DIR = keep
+
+    def test_overlapping_time_counts_once_and_agents_add_up(self):
+        self.b = self.base()
+        self.record_on(ap.HABITS_DIR, range(0, 10), n=2, label="Mac")
+        pc = self.record_on(self.tmp / "pc", range(5, 15), n=3, label="PC")
+        self.assertTrue(ap.save_peer_habits(pc, "mac"))
+        rec = ap.load_habits(1)[date_today()]
+        self.assertEqual(rec["active_minutes"], 15)       # minutes 0-14, not 20
+        self.assertEqual(rec["agent_minutes"], 2 * 10 + 3 * 10)
+        self.assertEqual(rec["max_parallel"], 5)          # 2 + 3 in minutes 5-9
+        self.assertEqual(rec["machines"], {"Mac": 10, "PC": 10})
+        self.assertEqual(len(rec["sessions"]), 1)
+        self.assertEqual(sum(rec["hours"]), 15)
+        self.assertEqual(ap.load_habits(1, mine=True)[date_today()]["active_minutes"], 10)
+        s = ap.habit_summary()
+        self.assertEqual(s["today"]["active_minutes"], 15)
+        self.assertEqual(s["today"]["max_parallel"], 5)
+
+    def test_streak_counts_days_on_any_computer(self):
+        from datetime import date, timedelta
+        d = date.today()
+        ap.STATE_DIR.mkdir(parents=True, exist_ok=True)
+        (ap.STATE_DIR / "days.json").write_text(json.dumps([d.isoformat()]))
+        peer = {"id": "pc", "kind": "habits", "days": {},
+                "streak_days": [(d - timedelta(days=i)).isoformat() for i in (1, 2)]}
+        self.assertTrue(ap.save_peer_habits(peer, "mac"))
+        self.assertEqual(ap.update_streak(False, []), 3)
+        self.assertEqual(ap.habit_summary()["streak"], 3)
+
+    def test_newest_copy_wins_and_junk_is_dropped(self):
+        day = date_today()
+        old = {"id": "pc", "days": {day: {"active_minutes": 50, "u": 200}}}
+        newer = {"id": "pc", "days": {day: {"active_minutes": 60, "u": 300, "tools": {"claude": "x"},
+                                            "act": [[1, 2], "bad", [1, 2, 3, 4]]},
+                                      "../etc": {"u": 999}}}
+        self.assertTrue(ap.save_peer_habits(newer, "mac"))
+        self.assertTrue(ap.save_peer_habits(old, "mac"))       # arrives late, ignored
+        self.assertFalse(ap.save_peer_habits({"id": "mac", "days": {}}, "mac"))  # ourselves
+        self.assertFalse(ap.save_peer_habits({"id": "x", "days": "nope"}, "mac"))
+        data = json.loads(ap._peer_file("pc").read_text())
+        self.assertEqual(list(data["days"]), [day])
+        rec = data["days"][day]
+        self.assertEqual((rec["active_minutes"], rec["tools"], rec["act"]), (60, {}, [[1, 2]]))
+        self.assertEqual(ap._peer_file("../../x").parent, ap.HABITS_DIR / "peers")
+
+    def test_hidden_projects_stay_home(self):
+        self.b = self.base()
+        cfg = {**ap.DEFAULT_CONFIG, "hide_projects": ["omega"]}
+        self.record_on(ap.HABITS_DIR, range(3))
+        pkt = ap.habit_packet(cfg, "me", "Mac")
+        self.assertNotIn("omega", json.dumps(pkt))
+        self.assertNotIn("seen", pkt["days"][date_today()])
+
+    def test_link_delivers_habit_packets_separately(self):
+        recv = ap.Link("k", port=0, target="127.0.0.1")
+        send = ap.Link("k", port=0, target="127.0.0.1")
+        send.port = recv.sock.getsockname()[1]
+        send.send({"id": "pc", "kind": "habits", "days": {}})
+        for _ in range(20):
+            recv.receive("me")
+            if recv.inbox:
+                break
+            time.sleep(0.05)
+        self.assertEqual([p["id"] for p in recv.inbox], ["pc"])
+        self.assertEqual(recv.peers, {})
+        recv.sock.close(), send.sock.close()
+
+    def test_relay_swaps_habits_on_their_own_branch(self):
+        cfg = {**ap.DEFAULT_CONFIG, "link_key": "k",
+               "web": {**ap.DEFAULT_CONFIG["web"], "enabled": True, "repo": "me/me"}}
+        import base64
+        theirs = ap.Relay("k", cfg).seal({"id": "pc", "kind": "habits", "days": {}})
+        written = {}
+
+        def call(token, method, path, body=None, timeout=15):
+            if "matching-refs" in path:
+                self.assertIn("agent-presence-habits-", path)
+                return [{"ref": "refs/heads/agent-presence-habits-mac", "object": {"sha": "s1"}},
+                        {"ref": "refs/heads/agent-presence-habits-pc", "object": {"sha": "s2"}}]
+            return {"content": base64.b64encode(theirs.encode()).decode()}
+        old = ap.github_call, ap.publish_files
+        ap.github_call = call
+        ap.publish_files = lambda token, repo, branch, files: written.update({branch: files})
+        try:
+            relay = ap.Relay("k", cfg)
+            relay.sync_habits({"id": "mac", "kind": "habits", "days": {}}, "tok")
+        finally:
+            ap.github_call, ap.publish_files = old
+        self.assertNotIn("days", written["agent-presence-habits-mac"]["habits.txt"])  # sealed
+        self.assertEqual([p["id"] for p in relay.inbox], ["pc"])
+
+    def test_same_session_from_two_computers_counts_once(self):
+        live = self.live(2, sid="wsl")
+        peer = {"id": "wsl-box", "model": "WSL", "tools": {}, "agents": [
+            {**live["claude"]["agents"][0]},
+            {**live["claude"]["agents"][0], "sid": "other"}]}
+        live = ap.merge_peers(live, [peer])
+        self.assertEqual(len(live["claude"]["agents"]), 3)
+
+    def test_today_numbers_include_linked_computers(self):
+        ap.STATS_AT[0] = time.time()  # skip scanning this machine's real logs
+        mine = ap.today_stats()
+        today = date_today()
+        ap.note_peer_today([{"id": "pc", "today": {"day": today, "tools": {"chatgpt": [600, 1000]},
+                                                    "commits": {"omega": 4, "px4": 1}}},
+                            {"id": "old", "today": {"day": "2001-01-01", "tools": {"claude": [9, 9]}}}])
+        got = ap.all_today_stats()
+        self.assertEqual(got["chatgpt"][0], mine.get("chatgpt", (0, 0))[0] + 600)
+        self.assertNotIn("old", ap.PEER_TODAY)
+        s = {"roots": {}}
+        self.assertEqual(ap.all_commits_today(s, {"px4"}), {"omega": 4})
+
+    def test_cloud_sessions_from_the_phone(self):
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        events = [{"type": "PushEvent", "created_at": now, "public": True, "repo": {"name": "me/omega"},
+                   "payload": {"head": "abc", "commits": []}},
+                  {"type": "PushEvent", "created_at": now, "public": False, "repo": {"name": "me/local"},
+                   "payload": {"commits": [{"message": "fix: thing"}]}},
+                  {"type": "PushEvent", "created_at": "2001-01-01T00:00:00Z", "repo": {"name": "me/old"},
+                   "payload": {"commits": [{"message": "Claude-Session: https://claude.ai/code/session_old"}]}}]
+
+        def call(token, method, path, body=None, timeout=15):
+            if path == "/user":
+                return {"login": "me"}
+            if path.startswith("/users/me/events"):
+                return events
+            if path == "/repos/me/omega/commits/abc":
+                return {"commit": {"message": "x\n\nClaude-Session: https://claude.ai/code/session_01AbC"}}
+            raise AssertionError(path)
+        saved = ap.github_call, ap.github_token
+        ap.github_call, ap.github_token = call, lambda cfg: "tok"
+        try:
+            cloud = ap.cloud_agents(ap.DEFAULT_CONFIG)
+            self.assertEqual(ap.cloud_agents({**ap.DEFAULT_CONFIG, "cloud_agents": False}), [])
+        finally:
+            ap.github_call, ap.github_token = saved
+        self.assertEqual([(a["project"], a["public"], a["status"]) for a in cloud], [("omega", True, "busy")])
+        live = ap.add_cloud({}, cloud)
+        live = ap.add_cloud(live, cloud)                    # already there: not added twice
+        self.assertEqual(len(live["claude"]["agents"]), 1)
+        self.assertIn("omega", live["claude"]["projects"])
+        lines = [ln["text"] for ln in ap.card_lines(ap.DEFAULT_CONFIG, "claude", live["claude"], 0)[0]]
+        self.assertTrue(any("working in the cloud" in t for t in lines), lines)
+        self.assertTrue(ap.coding_now(live))
+
+    def test_cloud_minutes_count_once_across_computers(self):
+        self.b = self.base()
+        self.record_on(ap.HABITS_DIR, range(0, 10), n=0, label="Mac", cloud=1)
+        pc = self.record_on(self.tmp / "pc", range(0, 10), n=0, label="PC", cloud=1)
+        ap.save_peer_habits(pc, "mac")
+        rec = ap.load_habits(1)[date_today()]
+        self.assertEqual((rec["active_minutes"], rec["agent_minutes"]), (10, 10))
+        self.assertEqual(rec["machines"].get("☁️ Cloud"), 10)
+        self.assertIn(date_today(), ap.own_streak_days())
+
+
 class Privacy(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
