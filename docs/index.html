@@ -452,7 +452,7 @@
       </div>
       <div class="previewbox">
         <div id="ap-preview" data-demo></div>
-        <span class="cap" id="ap-cap">Example of the website panel. Type your repo to see yours once it's set up.</span>
+        <span class="cap" id="ap-cap">Example of the website panel, with sample data (badged DEMO — not a live status). Type your repo to see yours once it's set up.</span>
       </div>
     </div>
   </div>
@@ -513,8 +513,12 @@
     const box = document.getElementById("ap-preview"), cap = document.getElementById("ap-cap");
     const site = "https://abelxmendoza.github.io/discord-agent-presence/";
     let kind = "md";
+    // Sample data only: demo:true makes the widget badge it DEMO and never
+    // present it as a live status (see embed.js / presence-truth-model.md).
     const demo = {
-      v: 2, updated: Math.floor(Date.now() / 1000) - 40, name: "Alex", state: "vibe-coding", last_active: "now",
+      demo: true,
+      v: 2, updated: Math.floor(Date.now() / 1000) - 40, name: "Alex", state: "vibe-coding",
+      last_active: new Date(Date.now() - 86400000).toISOString(),
       verb: "Watching", title: "Vibe Coding", model: "Opus 5.5",
       image: "assets/claude_crew.webp", headline: "⚡ 3 agents working · 1 waiting",
       tools: [{ name: "Claude" }, { name: "Codex" }, { name: "Cursor" }],
@@ -537,7 +541,6 @@
     };
     const root = box.attachShadow({ mode: "open" });
     AgentPresence.render(root, demo);
-    setInterval(() => { if (box.hasAttribute("data-demo")) { demo.updated = Math.floor(Date.now() / 1000) - 40; AgentPresence.render(root, demo); } }, 30000);
 
     let timer;
     function update() {
