@@ -1033,5 +1033,233 @@ class WindowsIPC(unittest.TestCase):
         self.assertEqual(fake.activities[0]["details"], "▸ test")
 
 
+class GithubStreak(unittest.TestCase):
+    """The coding streak is a union of evidenced sources (GitHub +
+    local git + daemon observation), deduplicated by America/Los_Angeles
+    day, with per-day provenance — never a local day counter alone."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.saved = ap.HABITS_DIR, ap.WEB_STATE, ap.STATE_DIR, ap.STREAK_GH_CACHE
+        ap.HABITS_DIR, ap.WEB_STATE = self.tmp / "habits", self.tmp / "web.json"
+        ap.STATE_DIR = self.tmp / "state"
+        ap.STREAK_GH_CACHE = self.tmp / "github-days.json"
+
+    def tearDown(self):
+        ap.HABITS_DIR, ap.WEB_STATE, ap.STATE_DIR, ap.STREAK_GH_CACHE = self.saved
+
+    def test_la_day_bucketing(self):
+        # 2026-10-29T06:30Z is 23:30 PDT on Oct 28; 08:30Z is 01:30 Oct 29.
+        self.assertEqual(ap._la_day(1793255400), "2026-10-28")
+        self.assertEqual(ap._la_day(1793262600), "2026-10-29")
+
+    def test_union_dedupes_days_and_keeps_provenance(self):  # acceptance 13
+        from datetime import date, timedelta
+        today = date.today()
+        d = lambda n: (today - timedelta(days=n)).isoformat()
+        info = ap.union_streak_days({
+            "github": {d(0), d(1), d(2)},
+            "local:x": {d(2): ["local-git:x"], d(3): ["local-git:x"]},  # d(3): unpushed only
+            "peer:y": {d(9): ["daemon:y"], d(10): ["daemon:y"]},
+        })
+        self.assertEqual(info["total"], 6)          # d(2) counted once
+        self.assertEqual(info["current"], 4)        # d(0)..d(3) — the unpushed day extends it
+        self.assertEqual(info["best"], 4)
+        self.assertEqual(info["days"][d(2)], ["github", "local-git:x"])
+        self.assertEqual(info["days"][d(3)], ["local-git:x"])
+        self.assertEqual(info["provenance"]["github"], 3)
+        self.assertEqual(info["provenance"]["daemon:y"], 2)
+
+    def test_github_days_serve_cache_marked_when_unreachable(self):
+        ap.STREAK_GH_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        ap.STREAK_GH_CACHE.write_text(json.dumps(
+            {"days": ["2026-10-20", "2026-10-21"], "fetched_at": 0, "login": "abel"}))
+        real, ap.github_token = ap.github_token, lambda cfg: None
+        try:
+            days, cached = ap.github_days(ap.DEFAULT_CONFIG)
+        finally:
+            ap.github_token = real
+        self.assertEqual(days, {"2026-10-20", "2026-10-21"})
+        self.assertTrue(cached)  # served from cache, and says so
+
+    def test_github_days_unknown_without_any_source(self):
+        real, ap.github_token = ap.github_token, lambda cfg: None
+        try:
+            days, cached = ap.github_days(ap.DEFAULT_CONFIG)
+        finally:
+            ap.github_token = real
+        self.assertIsNone(days)  # no cache + no token: unknown, not invented
+
+    def test_packet_carries_local_streak_days(self):
+        ap.STATE_DIR.mkdir(parents=True, exist_ok=True)
+        (ap.STATE_DIR / "days.json").write_text(json.dumps(["2026-10-26"]))
+        me = ap.machine_status(ap.DEFAULT_CONFIG, {})
+        mid = ap.machine_id()
+        self.assertEqual(me["streak_days"].get("2026-10-26"), [f"daemon:{mid}"])
+
+    def test_web_status_streak_comes_from_union(self):
+        info = {"current": 8, "best": 11, "total": 42,
+                "provenance": {"github": 40, "local-git:abc": 20}, "github_cached": False,
+                "days": {}}
+        cfg = {**ap.DEFAULT_CONFIG, "web": {**ap.DEFAULT_CONFIG["web"], "name": "Abel"}}
+        st = ap.web_status(cfg, {}, streak_info=info)
+        self.assertEqual(st["streak"], 8)
+        self.assertEqual(st["streak_source"], "union")
+        self.assertEqual(st["streak_days_total"], 42)
+        self.assertEqual(st["streak_provenance"], {"github": 40, "local-git:abc": 20})
+        by_key = {h["key"]: h["value"] for h in st["highlights"]}
+        self.assertEqual(by_key.get("streak"), "8 days")
+        self.assertEqual(by_key.get("best_streak"), "11 days")
+        self.assertEqual(by_key.get("active_days"), "42")
+        svg = ap.render_svg(ap.web_status(cfg, {"claude": {
+            "running_since": time.time() - 60, "focused": True, "projects": [], "roots": {},
+            "agents": [{"tool": "claude", "status": "busy", "action": "✍ editing x.py",
+                        "project": None, "model": None, "mtime": time.time(),
+                        "outcome": None, "cwd": None}]}}, streak_info=info))
+        self.assertIn("8 days", svg)  # the README card shows the union streak too
+
+
+class WebUnionPublish(unittest.TestCase):
+    """Several machines publish status.d/<id>.json to one branch: a
+    publish must preserve the other machines' files."""
+
+    def test_publish_union_keeps_other_machines_files(self):
+        calls = []
+
+        def fake(token, method, path, body=None, timeout=15):
+            calls.append((method, path, body))
+            if method == "GET" and "/git/refs/" in path:
+                return {"object": {"sha": "commitsha"}}
+            if method == "GET" and "/git/commits/" in path:
+                return {"tree": {"sha": "treesha"}}
+            if method == "GET" and "/git/trees/" in path:
+                return {"tree": [
+                    {"path": "status.json", "type": "blob", "mode": "100644", "sha": "old-status"},
+                    {"path": "status.d/other-machine.json", "type": "blob", "mode": "100644",
+                     "sha": "other-blob"},
+                    {"path": "status.d/mine.json", "type": "blob", "mode": "100644",
+                     "sha": "stale-mine"}]}
+            return {"sha": "abc"}
+        real, ap.github_call = ap.github_call, fake
+        try:
+            ap.publish_files_union("t", "me/me", "agent-presence-status",
+                                   {"status.json": "{}", "status.d/mine.json": "{}"})
+        finally:
+            ap.github_call = real
+        tree_post = next(b for m, p, b in calls if m == "POST" and p.endswith("/git/trees"))
+        entries = {e["path"]: e for e in tree_post["tree"]}
+        self.assertEqual(entries["status.d/other-machine.json"]["sha"], "other-blob")
+        self.assertIn("content", entries["status.d/mine.json"])  # ours is replaced, not kept
+        self.assertIn("content", entries["status.json"])
+        commit_post = next(b for m, p, b in calls if m == "POST" and p.endswith("/git/commits"))
+        self.assertEqual(commit_post["parents"], [])
+
+    def test_publisher_writes_own_machine_file(self):
+        seen = {}
+        real_pub, real_tok = ap.publish_files_union, ap.github_token
+        ap.publish_files_union = lambda t, r, b, files: seen.update(files)
+        ap.github_token = lambda cfg: "tok"
+        try:
+            cfg = {**ap.DEFAULT_CONFIG,
+                   "web": {**ap.DEFAULT_CONFIG["web"], "repo": "me/me", "enabled": True}}
+            pub = ap.WebPublisher(cfg)
+            self.assertTrue(pub.publish({"state": "idle", "agents": [], "projects": [],
+                                         "machines": [], "tools": [], "highlights": []},
+                                        own={"state": "idle", "agents": []}))
+        finally:
+            ap.publish_files_union, ap.github_token = real_pub, real_tok
+        own_path = f"status.d/{ap.machine_id()}.json"
+        self.assertIn(own_path, seen)
+        self.assertEqual(json.loads(seen[own_path])["machine_id"], ap.machine_id())
+        self.assertIn("status.json", seen)
+        self.assertIn("status.svg", seen)
+
+
+class MultiDeviceConsumer(unittest.TestCase):
+    """docs/embed.js mergeStatuses: several machines live at once, each
+    on its own evidence (acceptance 10, 11, 12 + the truth demotions)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def test_web_consumer_merges_machines(self):
+        script = self.tmp / "merge_test.js"
+        script.write_text(r"""
+const AP = require(process.argv[2]);
+const NOW = Math.floor(Date.now() / 1000);
+const iso = t => new Date(t * 1000).toISOString();
+let fails = 0;
+const eq = (got, want, what) => { if (got !== want) { fails++; console.log("FAIL", what, "got", JSON.stringify(got), "want", JSON.stringify(want)); } };
+const ok = (cond, what) => { if (!cond) { fails++; console.log("FAIL", what); } };
+function payload(mid, label, state, agents, ageS, extra) {
+  return Object.assign({ v: 2, schema_version: 2, machine_id: mid, name: "Abel", state: state,
+    heartbeat_at: iso(NOW - ageS), published_at: iso(NOW - ageS), updated: NOW - ageS,
+    agent_executing: agents.some(a => a.status === "busy"),
+    agent_waiting: agents.some(a => a.status === "waiting"), human_active: "unknown",
+    last_active: iso(NOW - ageS), agents: agents,
+    machines: [{ id: mid, label: label, icon: "💻", os: "test", agents: agents.length, last_seen_at: iso(NOW - ageS) }],
+    tools: [{ id: "claude", name: "Muse" }], projects: [], today: {}, highlights: [], streak: 0 }, extra || {});
+}
+const backend = payload("claude-backend", "Claude Backend", "coding",
+  [{ tool: "claude", tool_name: "Muse", status: "busy", action: "working", mobile_origin: "iphone" }], 10,
+  { streak: 8, streak_days_total: 8 });
+const mac = payload("mac1", "MacBook Pro", "coding",
+  [{ tool: "claude", tool_name: "Muse", status: "busy", action: "editing" }], 20);
+const linux = payload("scythe1", "scythe", "waiting",
+  [{ tool: "codex", tool_name: "Codex", status: "waiting", action: "waiting" }], 30);
+
+// (a) Three fresh machines at once, incl. an iPhone-origin busy agent.
+let m = AP.mergeStatuses([backend, mac, linux], NOW);
+eq(m.state, "coding", "a: merged state");
+eq(m.machines.map(x => x.label).join(","), "Claude Backend,MacBook Pro,scythe", "a: all machines");
+eq(m.agents.length, 3, "a: all agents");
+eq(m.streak, 8, "a: streak from the payload that knows it");
+eq(AP.validateStatus(m, NOW).state, "coding", "a: merged validates live");
+const root = { innerHTML: "" };
+AP.render(root, m);
+ok(/Claude Backend/.test(root.innerHTML) && /MacBook Pro/.test(root.innerHTML) && /scythe/.test(root.innerHTML), "a: render shows all 3 machines");
+ok(/📱/.test(root.innerHTML), "a: render shows the iPhone origin");
+ok(/● live/.test(root.innerHTML), "a: render is live");
+
+// (b) One stale + one fresh: fresh renders, stale drops individually.
+const staleMac = payload("mac1", "MacBook Pro", "coding",
+  [{ tool: "claude", status: "busy", action: "x" }], AP.TTL + 5000);
+m = AP.mergeStatuses([backend, staleMac], NOW);
+eq(m.machines.map(x => x.label).join(","), "Claude Backend", "b: stale dropped alone");
+eq(m.state, "coding", "b: fresh still renders live");
+
+// (c) All stale: overall offline.
+m = AP.mergeStatuses([staleMac, payload("scythe1", "scythe", "coding", [{ status: "busy" }], AP.TTL + 9000)], NOW);
+eq(AP.validateStatus(m, NOW).state, "offline", "c: all stale is offline");
+AP.render(root, m);
+ok(!/● live/.test(root.innerHTML), "c: render is not live");
+
+// (d) A single (legacy-shaped) payload merges to itself.
+m = AP.mergeStatuses([backend], NOW);
+eq(m.state, "coding", "d: single payload state");
+eq(m.machines.length, 1, "d: single machine");
+eq(AP.mergeStatuses([], NOW), null, "d: no payloads -> null (legacy fallback)");
+eq(AP.mergeStatuses([{ demo: true, state: "coding" }], NOW), null, "d: demo never merges as live");
+
+// (e) Truth demotions survive the merge.
+const waitingClaim = payload("mac1", "MacBook Pro", "coding",
+  [{ tool: "claude", status: "waiting", action: "waiting" }], 5);
+m = AP.mergeStatuses([waitingClaim], NOW);
+eq(m.state, "waiting", "e: coding claim with waiting agent demoted");
+eq(m.agent_executing, false, "e: not executing");
+const idleWithWaiting = payload("mac1", "MacBook Pro", "idle",
+  [{ tool: "cursor", status: "waiting", action: "waiting" }], 5);
+m = AP.mergeStatuses([backend, idleWithWaiting], NOW);
+eq(m.agents.length, 1, "e: idle machine's waiting agent is not listed");
+eq(m.machines.length, 2, "e: idle machine itself still shows as a machine");
+console.log(fails ? "MERGE FAILURES: " + fails : "merge ok");
+process.exit(fails ? 1 : 0);
+""")
+        import subprocess
+        r = subprocess.run(["node", str(script), str(Path(__file__).resolve().parent.parent / "docs" / "embed.js")],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
