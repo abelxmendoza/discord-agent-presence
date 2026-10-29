@@ -1,56 +1,60 @@
 {
  "v": 2,
  "schema_version": 2,
- "updated": 1793239433,
- "published_at": "2026-10-29T02:03:53Z",
- "heartbeat_at": "2026-10-29T02:03:53Z",
+ "machine_id": "claude-backend",
+ "updated": 1793240704,
+ "published_at": "2026-10-29T02:25:04Z",
+ "heartbeat_at": "2026-10-29T02:25:04Z",
  "tracking_since": "2026-10-29",
- "machine_reachable": true,
- "human_active": "unknown",
- "agent_executing": true,
+ "machine_reachable": false,
+ "human_active": false,
+ "agent_executing": false,
  "agent_waiting": false,
  "public_visibility": "on",
  "name": "Abel",
- "tool": "claude",
- "tools": [
-  {
-   "id": "claude",
-   "name": "Muse"
-  }
- ],
- "verb": "Playing",
- "title": "Muse",
- "headline": "⚡ 1 agent working",
- "mood": "focused",
+ "tool": null,
+ "tools": [],
+ "verb": null,
+ "title": null,
+ "headline": null,
+ "mood": "idle",
  "image": null,
- "agents": [
-  {
-   "tool": "claude",
-   "tool_name": "Muse",
-   "status": "busy",
-   "action": "Working on Abel's requests in Muse",
-   "project": null,
-   "model": "Muse Spark",
-   "machine": "Claude Backend",
-   "mobile_origin": "iphone"
-  }
- ],
+ "agents": [],
  "projects": [],
  "machines": [
   {
+   "id": "claude-backend",
    "label": "Claude Backend",
    "icon": "☁️",
    "os": "Muse backend · Linux VM",
    "os_full": "Muse backend (hosted Linux VM) — where Abel's Muse sessions run",
-   "agents": 1,
-   "last_seen_at": "2026-10-29T02:03:53Z"
+   "agents": 0,
+   "last_seen_at": "2026-10-29T02:25:04Z"
   }
  ],
  "today": {},
- "streak": 0,
- "highlights": [],
- "model": "Muse Spark",
+ "streak": 8,
+ "highlights": [
+  {
+   "key": "streak",
+   "value": "8 days",
+   "label": "coding streak"
+  },
+  {
+   "key": "best_streak",
+   "value": "8 days",
+   "label": "best streak"
+  }
+ ],
+ "model": null,
  "last_active": "2026-10-29T02:01:12Z",
  "landing": "https://abelxmendoza.github.io/discord-agent-presence/",
- "state": "coding"
+ "state": "offline",
+ "streak_source": "union",
+ "streak_days_total": 8,
+ "streak_provenance": {
+  "github": 7,
+  "local-git:claude-backend": 8
+ },
+ "streak_cached": false
 }
