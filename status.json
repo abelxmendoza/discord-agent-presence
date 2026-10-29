@@ -1,0 +1,56 @@
+{
+ "v": 2,
+ "schema_version": 2,
+ "updated": 1793239433,
+ "published_at": "2026-10-29T02:03:53Z",
+ "heartbeat_at": "2026-10-29T02:03:53Z",
+ "tracking_since": "2026-10-29",
+ "machine_reachable": true,
+ "human_active": "unknown",
+ "agent_executing": true,
+ "agent_waiting": false,
+ "public_visibility": "on",
+ "name": "Abel",
+ "tool": "claude",
+ "tools": [
+  {
+   "id": "claude",
+   "name": "Muse"
+  }
+ ],
+ "verb": "Playing",
+ "title": "Muse",
+ "headline": "⚡ 1 agent working",
+ "mood": "focused",
+ "image": null,
+ "agents": [
+  {
+   "tool": "claude",
+   "tool_name": "Muse",
+   "status": "busy",
+   "action": "Working on Abel's requests in Muse",
+   "project": null,
+   "model": "Muse Spark",
+   "machine": "Claude Backend",
+   "mobile_origin": "iphone"
+  }
+ ],
+ "projects": [],
+ "machines": [
+  {
+   "label": "Claude Backend",
+   "icon": "☁️",
+   "os": "Muse backend · Linux VM",
+   "os_full": "Muse backend (hosted Linux VM) — where Abel's Muse sessions run",
+   "agents": 1,
+   "last_seen_at": "2026-10-29T02:03:53Z"
+  }
+ ],
+ "today": {},
+ "streak": 0,
+ "highlights": [],
+ "model": "Muse Spark",
+ "last_active": "2026-10-29T02:01:12Z",
+ "landing": "https://abelxmendoza.github.io/discord-agent-presence/",
+ "state": "coding"
+}
