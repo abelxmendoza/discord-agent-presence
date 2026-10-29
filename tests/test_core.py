@@ -449,11 +449,17 @@ class Web(unittest.TestCase):
         self.assertEqual({a["action"] for a in st["agents"]}, {"✍ editing"})
         self.assertEqual([p["name"] for p in st["projects"]], ["omega-1"])  # private ones aren't listed
         blob = json.dumps(st)
-        for leak in ("employer-api", "secret", "nav.cpp", "since", "os_full"):
+        # "running_since" is the leak this guards; the bare substring "since"
+        # can no longer be banned now that the truth model publishes the
+        # (contract-required) tracking_since field name.
+        for leak in ("employer-api", "secret", "nav.cpp", "running_since", "os_full"):
             self.assertNotIn(leak, blob)
         self.assertNotIn("tokens", st["today"])  # off by default on the web
         off = ap.web_status(cfg, {}, state="offline")
-        self.assertEqual(off["last_active"], "today")
+        # Presence truth model: last_active is an absolute UTC timestamp of
+        # the last verified activity (here: the live call just above), never
+        # a day word and never "now". The SVG still displays only the day.
+        self.assertEqual(ap._day_word(ap._ts_of(off["last_active"])), "today")
         self.assertEqual(off["updated"], int(ap._midnight()))  # no exact sign-off time
 
     def test_svg_is_valid_escaped_and_clock_free(self):
@@ -540,6 +546,161 @@ class Web(unittest.TestCase):
 def date_today():
     from datetime import date
     return date.today().isoformat()
+
+
+class PresenceTruth(unittest.TestCase):
+    """docs/presence-truth-model.md: published state must be earned by
+    verified activity, and consumers must fail closed on stale or malformed
+    data. Publisher tests here; the web consumer (docs/embed.js) is driven
+    under Node with a frozen clock when Node is available."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.saved = ap.HABITS_DIR, ap.WEB_STATE
+        ap.HABITS_DIR, ap.WEB_STATE = self.tmp / "habits", self.tmp / "web.json"
+
+    def tearDown(self):
+        ap.HABITS_DIR, ap.WEB_STATE = self.saved
+
+    def cfg(self):
+        return {**ap.DEFAULT_CONFIG, "hide_projects": []}
+
+    def agent(self, status):
+        return {"tool": "claude", "status": status, "action": "⏳ waiting for me",
+                "project": "omega-1", "public": True, "model": None,
+                "mtime": time.time(), "outcome": None, "cwd": None}
+
+    def live(self, *agents, focused=False):
+        return {"claude": {"running_since": time.time() - 600, "focused": focused,
+                           "projects": ["omega-1"] if agents else [], "roots": {},
+                           "agents": list(agents)}}
+
+    def machine(self, in_use):
+        return [{"label": "Linux box", "icon": "🖥", "os": "Ubuntu 24.04", "agents": 0,
+                 "busy": 0, "in_use": in_use, "me": True, "last_seen_at": ap._iso_utc(time.time())}]
+
+    def seed_last_active(self, ts):
+        ap.WEB_STATE.write_text(json.dumps({"last_active": ts}))
+
+    def test_waiting_agent_is_waiting_and_last_active_unchanged(self):  # acceptance 1
+        before = time.time() - 3600
+        self.seed_last_active(before)
+        st = ap.web_status(self.cfg(), self.live(self.agent("waiting")),
+                           machines=self.machine(False))
+        self.assertEqual(st["state"], "waiting")
+        self.assertTrue(st["agent_waiting"])
+        self.assertFalse(st["agent_executing"])
+        self.assertEqual(st["last_active"], ap._iso_utc(before))  # untouched, absolute
+        self.assertNotEqual(st["last_active"], "now")
+        self.assertTrue(st["machine_reachable"])
+        self.assertEqual(st["schema_version"], st["v"])
+        self.assertIsNotNone(ap._ts_of(st["published_at"]))
+        self.assertIsNotNone(ap._ts_of(st["heartbeat_at"]))
+
+    def test_busy_agent_is_coding_and_advances_last_active(self):
+        self.seed_last_active(time.time() - 3600)
+        st = ap.web_status(self.cfg(), self.live(self.agent("busy")),
+                           machines=self.machine(False))
+        self.assertEqual(st["state"], "vibe-coding")
+        self.assertTrue(st["agent_executing"])
+        self.assertGreater(ap._ts_of(st["last_active"]), time.time() - 60)
+        # …and the next, quiet publish keeps that timestamp rather than "now".
+        off = ap.web_status(self.cfg(), {}, state="offline")
+        self.assertEqual(off["last_active"], st["last_active"])
+
+    def test_focused_human_with_fresh_input_is_coding(self):
+        st = ap.web_status(self.cfg(), self.live(focused=True), machines=self.machine(True))
+        self.assertEqual(st["human_active"], True)
+        self.assertEqual(st["state"], "coding")
+
+    def test_focus_without_input_evidence_is_unknown_not_true(self):
+        # No machines plumbed in -> no idle-sensor evidence -> never claim True.
+        st = ap.web_status(self.cfg(), self.live(focused=True))
+        self.assertEqual(st["human_active"], "unknown")
+        self.assertEqual(st["state"], "idle")
+
+    def test_offline_publish_signals_unreachable(self):
+        st = ap.web_status(self.cfg(), {}, state="offline")
+        self.assertEqual(st["state"], "offline")
+        self.assertFalse(st["machine_reachable"])
+        self.assertFalse(st["human_active"])
+        self.assertFalse(st["agent_executing"])
+        self.assertIsNone(st["last_active"])  # nothing verified yet, nothing invented
+
+    def test_machines_carry_last_seen_at(self):
+        now = time.time()
+        me = {"id": "a", "name": "", "model": "Linux box", "kind": "laptop",
+              "os": "Ubuntu 24.04", "os_full": "Ubuntu 24.04 LTS", "idle": 5, "agents": [], "tools": {}}
+        peer = {"id": "b", "name": "", "model": "MacBook Pro", "kind": "laptop", "t": now - 30,
+                "os": "macOS 15", "os_full": "macOS 15.1", "idle": 400,
+                "agents": [{"tool": "claude", "status": "busy", "action": "✍ editing",
+                            "project": None, "public": False, "model": None,
+                            "mtime": now - 30, "outcome": None}], "tools": {}}
+        out = ap.machines_summary(me, [peer], self.cfg())
+        by_label = {m["label"]: m for m in out}
+        self.assertEqual(by_label["MacBook Pro"]["last_seen_at"], ap._iso_utc(now - 30))
+        self.assertGreater(ap._ts_of(by_label["Linux box"]["last_seen_at"]), now - 60)
+        st = ap.web_status(self.cfg(), self.live(self.agent("busy")), machines=out)
+        self.assertTrue(all("last_seen_at" in m for m in st["machines"]))
+
+    def test_svg_renders_waiting(self):
+        import xml.etree.ElementTree as ET
+        st = ap.web_status(self.cfg(), self.live(self.agent("waiting")),
+                           machines=self.machine(False))
+        svg = ap.render_svg(st)
+        ET.fromstring(svg)
+        self.assertIn("Waiting", svg)        # STATE_WORDS knows the new state
+        self.assertIn("#f0b232", svg)        # amber dot, not the green "live" one
+
+    @unittest.skipUnless(__import__("shutil").which("node"), "node not available")
+    def test_web_consumer_fails_closed(self):  # acceptance 1, 2 and 8 (consumer side)
+        script = self.tmp / "consumer_test.js"
+        script.write_text(r"""
+const AP = require(process.argv[2]);
+const NOW = 1793200000;  // frozen clock
+const iso = t => new Date(t * 1000).toISOString();
+let fails = 0;
+const eq = (got, want, what) => { if (got !== want) { fails++; console.log("FAIL", what, "got", got, "want", want); } };
+const v = st => AP.validateStatus(st, NOW);
+// Fresh heartbeat + an executing agent: may show as coding.
+eq(v({ state: "vibe-coding", heartbeat_at: iso(NOW - 10), agents: [{ status: "busy" }] }).state, "vibe-coding", "busy fresh");
+// The observed regression: state claims coding, the only agent is waiting,
+// last_active is the string "now". Must not render as coding.
+const reg = v({ state: "coding", heartbeat_at: iso(NOW - 10), last_active: "now",
+                agents: [{ status: "waiting", action: "waiting" }] });
+eq(reg.state, "waiting", "waiting agent is not coding");
+eq(AP.parseTime("now"), null, '"now" is not a timestamp');
+// Acceptance 2: heartbeat older than the TTL -> offline, marked stale,
+// even though the payload still claims coding with a busy agent.
+const stale = v({ state: "coding", heartbeat_at: iso(NOW - AP.TTL - 500), agents: [{ status: "busy" }] });
+eq(stale.state, "offline", "stale heartbeat is offline");
+eq(stale.stale, true, "stale is flagged");
+// Acceptance 8: malformed payloads and clock skew fail safe, never coding.
+eq(v({}).ok, false, "empty payload rejected");
+eq(v({ state: "banana", heartbeat_at: iso(NOW) }).ok, false, "unknown state rejected");
+eq(v({ state: "coding", agents: [{ status: "busy" }] }).state, "offline", "no time evidence -> offline");
+eq(v({ state: "coding", heartbeat_at: iso(NOW + 3600), agents: [{ status: "busy" }] }).state, "offline", "future heartbeat untrusted");
+// Rendered output agrees: stale data is labelled stale, never "live";
+// demo data is badged DEMO and never claims live.
+const root = { innerHTML: "" };
+AP.render(root, { state: "coding", heartbeat_at: iso(NOW - AP.TTL - 500), agents: [{ status: "busy" }] });
+if (!/stale/.test(root.innerHTML) || /● live/.test(root.innerHTML)) { fails++; console.log("FAIL stale render"); }
+AP.render(root, { demo: true, state: "vibe-coding", name: "Alex", agents: [{ status: "busy", action: "x" }] });
+if (!/DEMO/.test(root.innerHTML) || /● live/.test(root.innerHTML)) { fails++; console.log("FAIL demo render"); }
+AP.render(root, {});
+if (!/No live status reported/.test(root.innerHTML)) { fails++; console.log("FAIL unavailable render"); }
+// The frozen clock must not leak into the renders above: re-render the stale
+// case against real time and confirm it is still not live.
+const root2 = { innerHTML: "" };
+AP.render(root2, { state: "coding", heartbeat_at: iso(1000), agents: [{ status: "busy" }] });
+if (/● live/.test(root2.innerHTML)) { fails++; console.log("FAIL ancient render claims live"); }
+console.log(fails ? "CONSUMER FAILURES: " + fails : "consumer ok");
+process.exit(fails ? 1 : 0);
+""")
+        import subprocess
+        r = subprocess.run(["node", str(script), str(Path(__file__).resolve().parent.parent / "docs" / "embed.js")],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
 class Privacy(unittest.TestCase):

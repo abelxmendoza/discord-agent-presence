@@ -2089,7 +2089,11 @@ def machines_summary(me, peers, cfg):
         out.append({"label": (cfg.get("machine_name") if p is me else p.get("name")) or p["model"],
                     "icon": machine_icon(p), "os": p.get("os", ""), "os_full": p.get("os_full", ""),
                     "agents": len(agents), "busy": sum(a["status"] == "busy" for a in agents),
-                    "in_use": in_use, "me": p is me})
+                    "in_use": in_use, "me": p is me,
+                    # When this machine was last verified: now for this computer,
+                    # the packet's own send time for a linked one (None if the
+                    # packet carried none). Presence consumers fail closed on it.
+                    "last_seen_at": _iso_utc(time.time() if p is me else p.get("t"))})
     return out
 
 
@@ -2425,8 +2429,8 @@ table{{width:100%;border-collapse:collapse}}td{{padding:6px 0;border-bottom:1px 
 WEB_BRANCH = "agent-presence-status"
 WEB_RAW = "https://raw.githubusercontent.com/{repo}/{branch}/{file}"
 WEB_STATE = STATE_DIR / "web.json"
-STATE_WORDS = {"vibe-coding": "vibe coding", "coding": "coding", "idle": "not coding right now",
-               "offline": "offline", "summary": "building"}
+STATE_WORDS = {"vibe-coding": "vibe coding", "coding": "coding", "waiting": "waiting",
+               "idle": "not coding right now", "offline": "offline", "summary": "building"}
 
 
 def web_cfg(cfg):
@@ -2499,6 +2503,28 @@ def is_public_project(s, name, agent=None):
     return bool(agent and agent.get("public"))
 
 
+def _iso_utc(ts):
+    """Absolute UTC timestamp ("2026-10-28T17:04:05Z") for an epoch, or None."""
+    if not ts:
+        return None
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+def _ts_of(value):
+    """Epoch seconds for an ISO-8601 UTC string or a number, else None."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            day, clock = value.split("T")
+            y, mo, d = (int(x) for x in day.split("-"))
+            hh, mm, ss = (int(x) for x in clock.rstrip("Z").split(":"))
+        except ValueError:
+            return None
+        return (date(y, mo, d).toordinal() - date(1970, 1, 1).toordinal()) * 86400 + hh * 3600 + mm * 60 + ss
+    return None
+
+
 def _day_word(ts):
     """"today" / "yesterday" / "Oct 20": never the exact time on the web."""
     if not ts:
@@ -2537,8 +2563,13 @@ def web_highlights(cfg, s=None):
 
 def web_status(cfg, live, machines=None, streak=0, state=None, habits=None):
     """What the README card and website widget show. Built to be public:
-    private repos are unnamed, OS is major-version only, and times are
-    rounded to the day."""
+    private repos are unnamed and OS is major-version only.
+
+    Presence follows docs/presence-truth-model.md: the signals are computed
+    independently and published as absolute UTC timestamps. `state` is a
+    coding state only with verified human activity or an executing agent —
+    an agent that is merely waiting publishes "waiting", and `last_active`
+    (the last verified activity) is an ISO timestamp, never "now"."""
     w = web_cfg(cfg)
     hidden = set(cfg["hide_projects"])
     try:
@@ -2547,23 +2578,52 @@ def web_status(cfg, live, machines=None, streak=0, state=None, habits=None):
         saved = {}
     h = habit_summary() if habits is None else habits
     top = next(((p, v) for p, v in h["week"]["projects"]), None)
-    out = {"v": 2, "updated": int(time.time()), "name": w["name"], "tool": None, "tools": [],
+    now = time.time()
+    out = {"v": 2, "schema_version": 2, "updated": int(now),
+           "published_at": _iso_utc(now), "heartbeat_at": _iso_utc(now),
+           "tracking_since": h["first_day"],
+           "machine_reachable": False, "human_active": "unknown",
+           "agent_executing": False, "agent_waiting": False,
+           "name": w["name"], "tool": None, "tools": [],
            "verb": None, "title": None, "headline": None, "mood": "idle", "image": None,
            "agents": [], "projects": [], "machines": [], "today": {}, "streak": h["streak"] or streak,
-           "model": None, "last_active": _day_word(saved.get("last_active")),
+           "model": None, "last_active": _iso_utc(saved.get("last_active")),
            "highlights": web_highlights(cfg, h), "landing": LANDING_URL}
     if top and "top_project" in w["share"] and top[0] in saved.get("public_projects", []):
         out["highlights"].append({"key": "top_project", "value": top[0], "label": "top project, 7 days"})
     if not live or state == "offline" or not w["live"]:
         out["state"] = state or ("idle" if w["live"] else "summary")
-        out["updated"] = int(_midnight())  # no exact "went offline at" time
+        out["updated"] = int(_midnight())  # legacy field: no exact "went offline at" time
+        # The publisher itself is alive and reporting (unless it is signing
+        # off as offline, or live mode is off and this is only a summary).
+        out["machine_reachable"] = bool(w["live"]) and state != "offline"
+        if state == "offline":
+            out["human_active"] = False
         return out
     primary, s = merge_states(live)
     busy = [a for a in s["agents"] if a["status"] == "busy"]
-    out["state"] = "vibe-coding" if busy else "coding" if s["focused"] or s["agents"] else "idle"
-    if out["state"] != "idle":
-        saved["last_active"] = time.time()
-        out["last_active"] = "now"
+    waiting = [a for a in s["agents"] if a["status"] == "waiting"]
+    out["machine_reachable"] = True
+    out["agent_executing"] = bool(busy)
+    out["agent_waiting"] = bool(waiting)
+    # Human activity needs both halves of the evidence: an agent/editor has
+    # focus, and a machine's idle sensor says it was touched recently. With
+    # no machine data at all the honest answer is "unknown", never True.
+    in_use = any(m.get("in_use") for m in machines or [])
+    out["human_active"] = (True if s["focused"] and in_use else
+                           "unknown" if not machines and s["focused"] else False)
+    if busy:
+        out["state"] = "vibe-coding"
+    elif out["human_active"] is True:
+        out["state"] = "coding"
+    elif waiting:
+        out["state"] = "waiting"
+    else:
+        out["state"] = "idle"
+    if out["state"] in ("vibe-coding", "coding"):
+        # Only verified activity moves last_active; waiting does not.
+        saved["last_active"] = now
+        out["last_active"] = _iso_utc(now)
     public = {p: p not in hidden and is_public_project(
         s, p, next((a for a in s["agents"] if a.get("project") == p), None)) for p in s["projects"]}
 
@@ -2586,11 +2646,16 @@ def web_status(cfg, live, machines=None, streak=0, state=None, habits=None):
                image=image(cfg, f"{primary}_{m}", f"{primary}_{MOOD_FALLBACK.get(m, m)}", primary),
                headline=headline)
     for a in sorted(s["agents"], key=lambda a: (a["status"] != "busy", -a["mtime"]))[:8]:
-        out["agents"].append({
+        entry = {
             "tool": a["tool"], "tool_name": TOOL_NAMES[a["tool"]].split(" ·")[0], "status": a["status"],
             "action": a["action"] if w["show_files"] else strip_file(a["action"]),
             "project": name(a.get("project"), a),
-            "model": pretty_model(a["model"]) if a.get("model") else None})
+            "model": pretty_model(a["model"]) if a.get("model") else None}
+        if a.get("machine"):  # provenance for agents on linked machines
+            entry["machine"] = a["machine"]
+        if a.get("mobile_origin"):  # a job started from a phone, never a phone daemon
+            entry["mobile_origin"] = a["mobile_origin"]
+        out["agents"].append(entry)
     models = [a["model"] for a in s["agents"] if a.get("model")]
     out["model"] = pretty_model(max(set(models), key=models.count)) if models else None
     for p in s["projects"][:6]:
@@ -2607,7 +2672,8 @@ def web_status(cfg, live, machines=None, streak=0, state=None, habits=None):
             "ci": ci_status(slug, g["branch"]) if slug and g and g["branch"] else None})
     saved["public_projects"] = sorted(set(saved.get("public_projects", [])) | {p for p, ok in public.items() if ok})[-50:]
     if w["show_machines"]:
-        out["machines"] = [{"label": x["label"], "icon": x["icon"], "os": x["os"], "agents": x["agents"]}
+        out["machines"] = [{"label": x["label"], "icon": x["icon"], "os": x["os"], "agents": x["agents"],
+                            **({"last_seen_at": x["last_seen_at"]} if x.get("last_seen_at") else {})}
                            for x in machines or []]
     stats = today_stats()
     out["today"] = {"agent_seconds": int(sum(v[0] for v in stats.values())),
@@ -2648,8 +2714,9 @@ def render_svg(st):
     if live:
         sub = " · ".join(filter(None, [st.get("title") and f"{st['verb']} {st['title']}",
                                        ", ".join(t["name"] for t in st["tools"][:3]), st.get("model")]))
-    elif st.get("last_active"):
-        sub = f"last coding {st['last_active']}"
+    elif _day_word(_ts_of(st.get("last_active"))):
+        # last_active is an absolute timestamp in the JSON; the card shows the day.
+        sub = f"last coding {_day_word(_ts_of(st['last_active']))}"
     else:
         sub = "Agent Presence"
     if live:
@@ -2670,7 +2737,8 @@ def render_svg(st):
     tile_rows = (len(hl) + 2) // 3
     tw, th, gap = (W - 2 * pad - 16) / 3, 46, 8
     H = pad + 50 + len(rows) * lh + (tile_rows * (th + gap) + 12 if hl else 0) + 34
-    dot = {"vibe-coding": "#23a55a", "coding": "#23a55a", "idle": "#f0b232"}.get(st["state"], "#80848e")
+    dot = {"vibe-coding": "#23a55a", "coding": "#23a55a", "waiting": "#f0b232",
+           "idle": "#f0b232"}.get(st["state"], "#80848e")
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" '
            f'role="img" aria-label="{_x(head)}">',
            '<style>text{font-family:"Segoe UI",Ubuntu,"Helvetica Neue",Arial,sans-serif;fill:#dbdee1}'

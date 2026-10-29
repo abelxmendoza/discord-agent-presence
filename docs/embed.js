@@ -13,11 +13,21 @@
  * whole page section can stay hidden until there's something to show.
  * Restyle with CSS variables on the element: --ap-bg, --ap-panel, --ap-text,
  * --ap-muted, --ap-line, --ap-accent, --ap-live, --ap-font, --ap-mono, --ap-radius.
+ *
+ * Presence truth (docs/presence-truth-model.md): this widget fails closed.
+ * A status only renders as live when its heartbeat is fresh (TTL below) AND
+ * it carries verified activity — an executing agent or an active human. A
+ * payload that claims "coding" for a merely waiting agent, a stale payload,
+ * and a malformed payload all render as waiting / offline / "no live status
+ * reported", never as live. Sample data must carry demo:true and is badged
+ * DEMO, never "live".
  */
 (function () {
   "use strict";
-  var STALE = 6 * 60;      // no update for this long = offline (it publishes every 2 min)
+  var TTL = 150;           // heartbeat freshness budget, seconds (truth model)
+  var SKEW = 60;           // a heartbeat further ahead than this is untrusted
   var POLL = 120 * 1000;
+  var STATES = ["vibe-coding", "coding", "waiting", "idle", "offline", "summary"];
 
   var CSS = [
     ":host{all:initial;display:block;font-family:var(--ap-font,system-ui,-apple-system,'Segoe UI',sans-serif);color:var(--ap-text,#e6e8ee)}",
@@ -67,6 +77,49 @@
     if (s < 86400) return Math.round(s / 3600) + " h ago";
     return new Date(t * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
   }
+  // Epoch seconds for a number or an ISO-8601 string; anything else —
+  // including the legacy string "now" — is not a time and returns null.
+  function parseTime(v) {
+    if (typeof v === "number" && isFinite(v)) return v;
+    if (typeof v === "string") {
+      var t = Date.parse(v);
+      return isNaN(t) ? null : t / 1000;
+    }
+    return null;
+  }
+  function arr(x) {
+    return Array.isArray(x) ? x.filter(function (e) { return e && typeof e === "object"; }) : [];
+  }
+  function isCoding(state) { return state === "vibe-coding" || state === "coding"; }
+
+  // The one place a payload is judged. Pure, so tests can drive it directly.
+  // Returns { ok, state, stale, ref, demo }: `state` is the state that may be
+  // SHOWN, which is the published state only after the truth checks pass.
+  function validateStatus(st, now) {
+    if (!st || typeof st !== "object" || Array.isArray(st)) return { ok: false };
+    if (STATES.indexOf(st.state) === -1) return { ok: false };
+    if (st.demo) return { ok: true, state: st.state, stale: false, ref: null, demo: true };
+    var ref = parseTime(st.heartbeat_at);
+    if (ref === null) ref = parseTime(st.published_at);
+    if (ref === null && typeof st.updated === "number") ref = st.updated;
+    if (ref === null) ref = parseTime(st.updated);
+    var stale = ref === null || now - ref > TTL || ref - now > SKEW;
+    var state = st.state;
+    if (stale) {
+      state = "offline";  // a stale snapshot proves nothing about right now
+    } else if (isCoding(state)) {
+      // "Coding" needs verified activity, however the payload was produced:
+      // an executing agent or an active human. Waiting agents are not that.
+      var agents = arr(st.agents);
+      var executing = st.agent_executing === true ||
+        agents.some(function (a) { return a.status === "busy"; });
+      var waiting = st.agent_waiting === true ||
+        agents.some(function (a) { return a.status === "waiting"; });
+      if (!executing && st.human_active !== true)
+        state = waiting ? "waiting" : "idle";
+    }
+    return { ok: true, state: state, stale: stale, ref: ref, demo: false };
+  }
   function tokens(n) {
     return n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? Math.round(n / 1e3) + "K" : String(n);
   }
@@ -85,42 +138,57 @@
       });
   }
 
+  function renderUnavailable(root) {
+    root.innerHTML = "<style>" + CSS + "</style>" +
+      "<div class='c'><div class='bar'></div><div class='top'><div><h3>No live status reported</h3>" +
+      "<div class='sub'>Nothing current is being published right now.</div></div></div>" +
+      "<div class='foot'><span>updates while I code</span>" +
+      "<a href='https://abelxmendoza.github.io/discord-agent-presence/' target='_blank' rel='noopener'>🤖 Agent Presence</a></div></div>";
+  }
+
   function render(root, st, hide) {
     hide = hide || {};
     var now = Date.now() / 1000;
-    var live0 = st.state === "vibe-coding" || st.state === "coding";
-    var state = live0 && now - st.updated > STALE ? "offline" : st.state;  // stopped updating
-    var live = state === "vibe-coding" || state === "coding";
+    var v = validateStatus(st, now);
+    if (!v.ok) { renderUnavailable(root); return; }
+    var state = v.state;
+    var demo = v.demo;
+    var live = !demo && isCoding(state);
+    var showcase = live || demo;  // demo data may illustrate, but is badged DEMO
+    var agents = arr(st.agents), projects = arr(st.projects), machines = arr(st.machines);
     var words = { "vibe-coding": ["is vibe coding", "Vibe coding"], coding: ["is coding", "Coding"],
+                  waiting: ["has an agent waiting", "An agent is waiting"],
                   idle: ["isn't coding right now", "Not coding right now"], offline: ["is offline", "Offline"],
                   summary: ["is building", "Building"] };
-    var head = st.name ? esc(st.name) + " " + words[state][0] : words[state][1];
+    var head = (st.name ? esc(st.name) + " " + words[state][0] : words[state][1]) +
+               (demo ? " <span class='tag'>DEMO</span>" : "");
     var sub;
-    if (live) {
-      var tools = (st.tools || []).map(function (t) { return t.name; }).join(", ");
+    if (showcase) {
+      var tools = arr(st.tools).map(function (t) { return t.name; }).filter(Boolean).join(", ");
       sub = "<b>" + esc(st.verb || "Playing") + " " + esc(st.title || "Coding") + "</b>" +
             (tools ? " · " + esc(tools) : "") + (st.model ? " · " + esc(st.model) : "");
     } else {
-      var la = typeof st.last_active === "number" ? ago(st.last_active) : st.last_active;
-      sub = la && la !== "now" ? "Last coding " + esc(la) : "Agent Presence";
+      var la = parseTime(st.last_active);
+      sub = la !== null ? "Last coding " + esc(ago(la)) : "Agent Presence";
     }
     var html = "<div class='c'><div class='bar'></div><div class='top'>";
     if (st.image) html += "<div class='pic'><img alt='' src='" + esc(st.image) + "'><span class='dot " +
-      (live ? "on" : state === "idle" ? "idle" : "") + "'></span></div>";
+      (live ? "on" : state === "idle" || state === "waiting" ? "idle" : "") + "'></span></div>";
     html += "<div><h3>" + head + "</h3><div class='sub'>" + sub + "</div></div></div>";
 
-    if (live && st.agents && st.agents.length) {
+    if ((showcase || state === "waiting") && agents.length) {
       html += "<div class='sec'><div class='lbl'>Agents · " + esc(st.headline || "") + "</div><ul>";
-      st.agents.slice(0, 6).forEach(function (a) {
-        var meta = [a.tool_name, a.project, a.model, a.machine].filter(Boolean).map(esc).join(" · ");
+      agents.slice(0, 6).forEach(function (a) {
+        var meta = [a.mobile_origin ? "📱 " + a.mobile_origin + " →" : null,
+                    a.tool_name, a.project, a.model, a.machine].filter(Boolean).map(esc).join(" · ");
         html += "<li><span class='tag " + (a.status === "busy" ? "busy'>working" : "wait'>waiting") +
                 "</span>" + esc(a.action) + "<div class='m'>" + meta + "</div></li>";
       });
       html += "</ul></div>";
     }
-    if (live && st.projects && st.projects.length && !hide.projects) {
+    if (showcase && projects.length && !hide.projects) {
       html += "<div class='sec'><div class='lbl'>Projects</div><ul>";
-      st.projects.slice(0, 4).forEach(function (p) {
+      projects.slice(0, 4).forEach(function (p) {
         var name = p.url ? "<a href='" + esc(p.url) + "' target='_blank' rel='noopener'>" + esc(p.name) + "</a>" : esc(p.name);
         var bits = [];
         if (p.branch) bits.push("🌿 " + esc(p.branch));
@@ -131,19 +199,19 @@
       });
       html += "</ul></div>";
     }
-    if (live && st.machines && st.machines.length && !hide.machines) {
-      html += "<div class='sec'><div class='lbl'>" + (st.machines.length > 1 ? st.machines.length + " machines" : "Machine") + "</div><ul>";
-      st.machines.forEach(function (m) {
+    if (showcase && machines.length && !hide.machines) {
+      html += "<div class='sec'><div class='lbl'>" + (machines.length > 1 ? machines.length + " machines" : "Machine") + "</div><ul>";
+      machines.forEach(function (m) {
         var what = m.agents ? m.agents + " agent" + (m.agents > 1 ? "s" : "") : "online";
         html += "<li>" + esc(m.icon) + " " + esc(m.label) + "<div class='m'>" + esc(m.os_full || m.os) + " · " + what + "</div></li>";
       });
       html += "</ul></div>";
     }
-    var t = st.today || {}, stats = [];
-    if (live && t.agent_seconds >= 60) stats.push([dur(t.agent_seconds), "agent time today"]);
-    if (live && t.tokens && !hide.tokens) stats.push([tokens(t.tokens), "tokens today"]);
-    if (live && t.commits) stats.push([t.commits, "commits today"]);
-    (st.highlights || []).forEach(function (h) {
+    var t = st.today && typeof st.today === "object" ? st.today : {}, stats = [];
+    if (showcase && t.agent_seconds >= 60) stats.push([dur(t.agent_seconds), "agent time today"]);
+    if (showcase && t.tokens && !hide.tokens) stats.push([tokens(t.tokens), "tokens today"]);
+    if (showcase && t.commits) stats.push([t.commits, "commits today"]);
+    arr(st.highlights).forEach(function (h) {
       if (!(hide.tokens && h.key === "tokens") && !(h.key === "streak" && stats.some(function (x) { return x[1] === "coding streak"; })))
         stats.push([h.value, h.label]);
     });
@@ -153,7 +221,11 @@
         return "<div class='stat'><b>" + esc(s[0]) + "</b><span>" + esc(s[1]) + "</span></div>";
       }).join("") + "</div></div>";
     }
-    html += "<div class='foot'><span>" + (live ? "● live · updated " + esc(ago(st.updated)) : "updates while I code") + "</span><a href='" +
+    var foot = demo ? "sample data · not a live status"
+      : live ? "● live · updated " + esc(ago(typeof st.updated === "number" ? st.updated : v.ref))
+      : v.stale && v.ref ? "⚠ stale · data from " + esc(new Date(v.ref * 1000).toLocaleString())
+      : "updates while I code";
+    html += "<div class='foot'><span>" + foot + "</span><a href='" +
             esc(st.landing || "https://abelxmendoza.github.io/discord-agent-presence/") +
             "' target='_blank' rel='noopener'>🤖 Agent Presence</a></div></div>";
     root.innerHTML = "<style>" + CSS + "</style>" + html;
@@ -174,7 +246,12 @@
       load(repo, branch).then(function (st) {
         last = st; render(root, st, hide); el.hidden = false;
         if (sec) sec.hidden = false;  // a page section that waits for real data
-      }).catch(function () { if (!last) { el.hidden = true; if (sec) sec.hidden = true; } });
+      }).catch(function () {
+        // A failed fetch is itself the truth: no live status is reported.
+        // Show the neutral card; if older data exists, the re-render timer
+        // keeps showing it with its (now stale) timestamp until it downgrades.
+        if (!last) { renderUnavailable(root); el.hidden = false; if (sec) sec.hidden = false; }
+      });
     }
     tick();
     setInterval(function () { if (!document.hidden) tick(); }, POLL);
@@ -187,7 +264,11 @@
     var els = document.querySelectorAll("[data-agent-presence]");
     for (var i = 0; i < els.length; i++) mount(els[i]);
   }
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", scan);
-  else scan();
-  window.AgentPresence = { scan: scan, render: render };
+  if (typeof document !== "undefined") {
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", scan);
+    else scan();
+  }
+  var api = { scan: scan, render: render, validateStatus: validateStatus, parseTime: parseTime, TTL: TTL };
+  if (typeof window !== "undefined") window.AgentPresence = api;
+  if (typeof module !== "undefined" && module.exports) module.exports = api;  // unit tests under Node
 })();
