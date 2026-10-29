@@ -1,9 +1,10 @@
 {
  "v": 2,
  "schema_version": 2,
- "updated": 1793239630,
- "published_at": "2026-10-29T02:07:10Z",
- "heartbeat_at": "2026-10-29T02:07:10Z",
+ "machine_id": "claude-backend",
+ "updated": 1793242064,
+ "published_at": "2026-10-29T02:47:44Z",
+ "heartbeat_at": "2026-10-29T02:47:44Z",
  "tracking_since": "2026-10-29",
  "machine_reachable": true,
  "human_active": "unknown",
@@ -28,7 +29,7 @@
    "tool": "claude",
    "tool_name": "Muse",
    "status": "busy",
-   "action": "Working on Abel's requests in Muse",
+   "action": "Programming work executing in Muse",
    "project": null,
    "model": "Muse Spark",
    "machine": "Claude Backend"
@@ -37,19 +38,38 @@
  "projects": [],
  "machines": [
   {
+   "id": "claude-backend",
    "label": "Claude Backend",
    "icon": "☁️",
    "os": "Muse backend · Linux VM",
    "os_full": "Muse backend (hosted Linux VM) — where Abel's Muse sessions run",
    "agents": 1,
-   "last_seen_at": "2026-10-29T02:07:10Z"
+   "last_seen_at": "2026-10-29T02:47:44Z"
   }
  ],
  "today": {},
- "streak": 0,
- "highlights": [],
+ "streak": 8,
+ "highlights": [
+  {
+   "key": "streak",
+   "value": "8 days",
+   "label": "coding streak"
+  },
+  {
+   "key": "best_streak",
+   "value": "8 days",
+   "label": "best streak"
+  }
+ ],
  "model": "Muse Spark",
- "last_active": "2026-10-29T02:05:15Z",
+ "last_active": "2026-10-29T02:45:09Z",
  "landing": "https://abelxmendoza.github.io/discord-agent-presence/",
- "state": "coding"
+ "state": "coding",
+ "streak_source": "union",
+ "streak_days_total": 8,
+ "streak_provenance": {
+  "github": 7,
+  "local-git:claude-backend": 8
+ },
+ "streak_cached": false
 }
