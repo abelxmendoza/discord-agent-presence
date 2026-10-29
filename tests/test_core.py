@@ -556,14 +556,19 @@ class PresenceTruth(unittest.TestCase):
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.saved = ap.HABITS_DIR, ap.WEB_STATE
-        ap.HABITS_DIR, ap.WEB_STATE = self.tmp / "habits", self.tmp / "web.json"
+        self.saved = ap.HABITS_DIR, ap.WEB_STATE, ap.JOB_ORIGINS
+        ap.HABITS_DIR = self.tmp / "habits"
+        ap.WEB_STATE = self.tmp / "web.json"
+        ap.JOB_ORIGINS = self.tmp / "job-origins.json"
 
     def tearDown(self):
-        ap.HABITS_DIR, ap.WEB_STATE = self.saved
+        ap.HABITS_DIR, ap.WEB_STATE, ap.JOB_ORIGINS = self.saved
 
     def cfg(self):
         return {**ap.DEFAULT_CONFIG, "hide_projects": []}
+
+    def declare_origins(self, origins):
+        ap.JOB_ORIGINS.write_text(json.dumps(origins))
 
     def agent(self, status):
         return {"tool": "claude", "status": status, "action": "⏳ waiting for me",
@@ -643,6 +648,36 @@ class PresenceTruth(unittest.TestCase):
         st = ap.web_status(self.cfg(), self.live(self.agent("busy")), machines=out)
         self.assertTrue(all("last_seen_at" in m for m in st["machines"]))
 
+    def test_phone_origin_alone_creates_no_mobile_state(self):  # acceptance 5 style
+        # A declared iPhone origin (or a phone merely being in use) is not
+        # activity: with no executing agent there is no mobile coding state
+        # and no origin marker anywhere in the published status.
+        self.declare_origins({"claude": "iphone"})
+        st = ap.web_status(self.cfg(), self.live(self.agent("waiting")),
+                           machines=self.machine(False))
+        self.assertEqual(st["state"], "waiting")
+        self.assertNotIn("mobile_origin", st["agents"][0])
+        self.assertNotIn("iphone", json.dumps(st))
+        idle = ap.web_status(self.cfg(), self.live(), machines=self.machine(False))
+        self.assertEqual(idle["state"], "idle")
+        self.assertNotIn("iphone", json.dumps(idle))
+
+    def test_phone_origin_shows_while_executing_then_stops(self):  # acceptance 6 style
+        self.declare_origins({"claude": {"origin": "iphone"}})
+        st = ap.web_status(self.cfg(), self.live(self.agent("busy")),
+                           machines=self.machine(False))
+        self.assertEqual(st["state"], "vibe-coding")
+        self.assertEqual(st["agents"][0]["mobile_origin"], "iphone")
+        done = ap.web_status(self.cfg(), self.live(self.agent("waiting")),
+                             machines=self.machine(False))
+        self.assertEqual(done["state"], "waiting")
+        self.assertNotIn("mobile_origin", done["agents"][0])  # marker ends with execution
+
+    def test_origin_is_never_invented(self):
+        st = ap.web_status(self.cfg(), self.live(self.agent("busy")),
+                           machines=self.machine(False))
+        self.assertNotIn("mobile_origin", st["agents"][0])
+
     def test_svg_renders_waiting(self):
         import xml.etree.ElementTree as ET
         st = ap.web_status(self.cfg(), self.live(self.agent("waiting")),
@@ -694,6 +729,13 @@ if (!/No live status reported/.test(root.innerHTML)) { fails++; console.log("FAI
 const root2 = { innerHTML: "" };
 AP.render(root2, { state: "coding", heartbeat_at: iso(1000), agents: [{ status: "busy" }] });
 if (/● live/.test(root2.innerHTML)) { fails++; console.log("FAIL ancient render claims live"); }
+// Phone origin: rendered for an executing job, gone when it is only waiting
+// (fresh heartbeats here are relative to the real clock render() uses).
+const freshIso = () => new Date().toISOString();
+AP.render(root, { state: "vibe-coding", heartbeat_at: freshIso(), agents: [{ status: "busy", action: "working", mobile_origin: "iphone" }] });
+if (!/📱/.test(root.innerHTML)) { fails++; console.log("FAIL origin while executing"); }
+AP.render(root, { state: "waiting", heartbeat_at: freshIso(), agents: [{ status: "waiting", action: "waiting", mobile_origin: "iphone" }] });
+if (/📱/.test(root.innerHTML)) { fails++; console.log("FAIL origin while waiting"); }
 console.log(fails ? "CONSUMER FAILURES: " + fails : "consumer ok");
 process.exit(fails ? 1 : 0);
 """)
@@ -701,6 +743,74 @@ process.exit(fails ? 1 : 0);
         r = subprocess.run(["node", str(script), str(Path(__file__).resolve().parent.parent / "docs" / "embed.js")],
                            capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+class FakeIPC:
+    """Stands in for DiscordIPC: only the surface public_gate may read."""
+
+    def __init__(self, connected=False, status=None):
+        self.sock = object() if connected else None
+        self.user_status = status
+
+    @property
+    def connected(self):
+        return self.sock is not None
+
+
+class DiscordGate(unittest.TestCase):
+    """The public_presence switch: one gate for Discord Rich Presence, the
+    website JSON/SVG and the README publisher, failing closed whenever the
+    Discord signal is off, absent or ambiguous."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.saved = ap.HABITS_DIR, ap.WEB_STATE
+        ap.HABITS_DIR, ap.WEB_STATE = self.tmp / "habits", self.tmp / "web.json"
+
+    def tearDown(self):
+        ap.HABITS_DIR, ap.WEB_STATE = self.saved
+
+    def cfg(self, mode):
+        return {**ap.DEFAULT_CONFIG, "hide_projects": [], "public_presence": mode}
+
+    def conns(self, *ipcs):
+        return {"claude": list(ipcs)}
+
+    def live_busy(self):
+        agent = {"tool": "claude", "status": "busy", "action": "✍ editing",
+                 "project": "omega-1", "public": True, "model": None,
+                 "mtime": time.time(), "outcome": None, "cwd": None}
+        return {"claude": {"running_since": time.time() - 600, "focused": False,
+                           "projects": ["omega-1"], "roots": {}, "agents": [agent]}}
+
+    def test_on_and_off_ignore_discord(self):
+        self.assertTrue(ap.public_gate(self.cfg("on"), None))
+        self.assertTrue(ap.public_gate(self.cfg("on"), self.conns(FakeIPC())))
+        self.assertFalse(ap.public_gate(self.cfg("off"), self.conns(FakeIPC(connected=True))))
+
+    def test_sync_needs_a_running_client(self):
+        cfg = self.cfg("discord")
+        self.assertFalse(ap.public_gate(cfg, None))                       # no daemon signal
+        self.assertFalse(ap.public_gate(cfg, self.conns(FakeIPC())))      # client closed
+        self.assertTrue(ap.public_gate(cfg, self.conns(FakeIPC(connected=True))))
+
+    def test_sync_fails_closed_on_hidden_status(self):
+        cfg = self.cfg("discord")
+        for status in ("invisible", "offline"):
+            self.assertFalse(ap.public_gate(cfg, self.conns(FakeIPC(connected=True, status=status))), status)
+        self.assertTrue(ap.public_gate(cfg, self.conns(FakeIPC(connected=True, status="online"))))
+
+    def test_gated_status_publishes_offline_when_closed(self):
+        closed = ap.gated_web_status(self.cfg("discord"), self.conns(FakeIPC()), self.live_busy())
+        self.assertEqual(closed["state"], "offline")
+        self.assertFalse(closed["machine_reachable"])
+        self.assertFalse(closed["agent_executing"])  # the busy agent is NOT leaked
+        off = ap.gated_web_status(self.cfg("off"), self.conns(FakeIPC(connected=True)), self.live_busy())
+        self.assertEqual(off["state"], "offline")
+        open_ = ap.gated_web_status(self.cfg("discord"),
+                                    self.conns(FakeIPC(connected=True)), self.live_busy())
+        self.assertEqual(open_["state"], "vibe-coding")
+        self.assertTrue(open_["agent_executing"])
 
 
 class Privacy(unittest.TestCase):

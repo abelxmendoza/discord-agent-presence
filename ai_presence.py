@@ -81,6 +81,12 @@ DEFAULT_CONFIG = {
     # Same key on each of your computers = they share one card that follows
     # whichever one you're using. Set with `agent-presence link`.
     "link_key": "",
+    # One switch for every public surface at once (Discord Rich Presence,
+    # the website status JSON/SVG, the README card): "on", "off", or
+    # "discord" — follow the local Discord client (see public_gate). When
+    # the gate is closed the website publishes a neutral offline status
+    # instead of your activity, and the Discord cards are cleared.
+    "public_presence": "on",
     # Publish what you're doing to GitHub for a README card and a website
     # widget, with more detail than Discord shows. Set up with
     # `agent-presence web setup`.
@@ -2429,6 +2435,7 @@ table{{width:100%;border-collapse:collapse}}td{{padding:6px 0;border-bottom:1px 
 WEB_BRANCH = "agent-presence-status"
 WEB_RAW = "https://raw.githubusercontent.com/{repo}/{branch}/{file}"
 WEB_STATE = STATE_DIR / "web.json"
+JOB_ORIGINS = STATE_DIR / "job-origins.json"
 STATE_WORDS = {"vibe-coding": "vibe coding", "coding": "coding", "waiting": "waiting",
                "idle": "not coding right now", "offline": "offline", "summary": "building"}
 
@@ -2561,6 +2568,27 @@ def web_highlights(cfg, s=None):
     return out
 
 
+def load_job_origins():
+    """Origins declared locally for agent jobs, from JOB_ORIGINS:
+    {"claude": "iphone"} or {"claude": {"origin": "iphone"}} — how a job
+    STARTED (e.g. from the Muse iOS app), recorded by whatever launched it:
+    by hand, or later by a fleet/config sync. An origin is provenance, not
+    activity: it is never inferred from a phone merely being online, and
+    web_status publishes it only while the named agent is executing."""
+    try:
+        data = json.loads(JOB_ORIGINS.read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for key, value in data.items():
+        origin = value.get("origin") if isinstance(value, dict) else value
+        if origin:
+            out[str(key)] = str(origin)
+    return out
+
+
 def web_status(cfg, live, machines=None, streak=0, state=None, habits=None):
     """What the README card and website widget show. Built to be public:
     private repos are unnamed and OS is major-version only.
@@ -2645,6 +2673,7 @@ def web_status(cfg, live, machines=None, streak=0, state=None, habits=None):
                title="Vibe Coding" if pick_name(cfg, s, 2) else "Coding", mood=m,
                image=image(cfg, f"{primary}_{m}", f"{primary}_{MOOD_FALLBACK.get(m, m)}", primary),
                headline=headline)
+    origins = load_job_origins()
     for a in sorted(s["agents"], key=lambda a: (a["status"] != "busy", -a["mtime"]))[:8]:
         entry = {
             "tool": a["tool"], "tool_name": TOOL_NAMES[a["tool"]].split(" ·")[0], "status": a["status"],
@@ -2653,8 +2682,12 @@ def web_status(cfg, live, machines=None, streak=0, state=None, habits=None):
             "model": pretty_model(a["model"]) if a.get("model") else None}
         if a.get("machine"):  # provenance for agents on linked machines
             entry["machine"] = a["machine"]
-        if a.get("mobile_origin"):  # a job started from a phone, never a phone daemon
-            entry["mobile_origin"] = a["mobile_origin"]
+        # A job started from a phone is a label on that job, never a phone
+        # daemon — and it is published only while the job is executing, so
+        # the marker disappears the moment the execution evidence does.
+        origin = a.get("mobile_origin") or origins.get(a.get("session") or "") or origins.get(a["tool"])
+        if origin and a["status"] == "busy":
+            entry["mobile_origin"] = origin
         out["agents"].append(entry)
     models = [a["model"] for a in s["agents"] if a.get("model")]
     out["model"] = pretty_model(max(set(models), key=models.count)) if models else None
@@ -2897,6 +2930,12 @@ class DiscordIPC:
         self.sock = None
         self.shown = None
         self.last_sent = 0.0
+        self.user_status = None  # only if the READY frame ever reports one
+
+    @property
+    def connected(self):
+        """The local Discord client is running and holds this connection."""
+        return self.sock is not None
 
     def _send(self, op, payload):
         data = json.dumps(payload).encode()
@@ -2928,6 +2967,10 @@ class DiscordIPC:
             if resp.get("evt") != "READY":
                 self.close()
                 raise ConnectionError(f"handshake failed: {resp}")
+            # The documented READY frame carries the user, not their
+            # presence status; record a status only if one is ever sent.
+            data = resp.get("data") or {}
+            self.user_status = (data.get("user") or {}).get("status") or data.get("status")
             return True
         return False
 
@@ -2959,6 +3002,59 @@ class DiscordIPC:
             except OSError:
                 pass
         self.sock = None
+        self.user_status = None
+
+
+# ------------------------------------------------------- presence gate ----
+
+def public_gate(cfg, conns=None):
+    """Is public presence on right now? One answer for every public surface:
+    Discord Rich Presence, the website status JSON/SVG, the README card.
+
+    cfg["public_presence"]: "on" (default), "off", or "discord" — follow the
+    local Discord client. Sync uses only what this tool's own Discord IPC
+    connection legitimately reports (no user tokens, no self-bots, no
+    scraping): whether the desktop client is running and holding a
+    connection, plus the user's status IF a READY frame ever carries one
+    (today's client does not send it, so Invisible-while-the-app-is-open is
+    not observable here — Discord itself still refrains from broadcasting
+    your card while you are invisible). Anything unavailable or ambiguous —
+    no daemon connections, client closed — fails closed.
+    """
+    mode = cfg.get("public_presence", "on")
+    if mode == "off":
+        return False
+    if mode != "discord":
+        return True
+    live = [ipc for group in (conns or {}).values() for ipc in group if ipc.connected]
+    if not live:  # client not running (or no daemon to ask): fail closed
+        return False
+    if any(ipc.user_status in ("invisible", "offline") for ipc in live):
+        return False
+    return True
+
+
+def probe_discord(conns):
+    """Handshake-only connections, made in "discord" mode so the gate can
+    read whether the local client is running. A bare handshake displays
+    nothing; activities are still gated separately."""
+    for group in (conns or {}).values():
+        for ipc in group:
+            if not ipc.connected:
+                try:
+                    ipc.connect()
+                except Exception:
+                    pass
+
+
+def gated_web_status(cfg, conns, live, machines=None, streak=0):
+    """The status the web publisher may show right now: the real one only
+    while the gate is open; otherwise the neutral offline status, freshly
+    published so the website goes quiet at once instead of coasting on the
+    consumer's staleness TTL."""
+    if public_gate(cfg, conns):
+        return web_status(cfg, live, machines, streak)
+    return web_status(cfg, {}, state="offline")
 
 
 # --------------------------------------------------------------- main ----
@@ -3098,20 +3194,24 @@ def _loop(cfg, conns, link, web, relay=None):
             web_leader = pick_leader(me, peers, web_leader, need="web")
             publish = bool(web) and web_leader == me["id"]
             leader_is_me["v"], leader_is_me["web"] = leader == me["id"], publish
+            if cfg.get("public_presence") == "discord":
+                probe_discord(conns)  # so the gate reads a live signal, not a stale one
+            gate = public_gate(cfg, conns)
             acts, cards = {}, {}  # unless this computer shows the card
             if leader == me["id"] or publish:
                 machines = machines_summary(me, peers, cfg)
                 here = next(m["label"] for m in machines if m["me"])
                 switched = here if time.time() - switched_at < 120 and switched_from else None
                 live = merge_peers(live, peers)
-                if leader == me["id"]:
+                if leader == me["id"] and gate:  # gate closed = cards cleared below
                     acts, cards = activities(cfg, tick, live, set(conns) - {"combined"},
                                              machines, switched)
                 if publish:
                     roots = {r for st in live.values() for p, r in st["roots"].items()
                              if p not in cfg["hide_projects"]}
-                    web.update(web_status(cfg, live, machines, update_streak(bool(live), roots)
-                                          if cfg["show_streak"] else 0))
+                    web.update(gated_web_status(cfg, conns, live, machines,
+                                                update_streak(bool(live), roots)
+                                                if cfg["show_streak"] else 0))
         except Exception as e:  # never let a parsing hiccup kill the cards
             log("snapshot failed:", repr(e))
             time.sleep(cfg["poll_seconds"])
@@ -3481,7 +3581,7 @@ def cmd_web(action, repo=None, name=None, token=None, readme=False, yes=False):
         raise
     cfg["web"] = {**cfg["web"], "enabled": True, "repo": repo, "name": name or w["name"] or login}
     live = snapshot(cfg)
-    st = web_status(cfg, live, machines_summary(machine_status(cfg, live), [], cfg))
+    st = gated_web_status(cfg, None, live, machines_summary(machine_status(cfg, live), [], cfg))
     if not WebPublisher(cfg).publish(st):
         sys.exit("Couldn't publish. The token needs permission to write to " + repo + ".")
     save_config(cfg)

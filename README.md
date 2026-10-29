@@ -315,6 +315,7 @@ Presence apps* on.
 | `machine_name` | `""` | What to call this computer; blank = its model |
 | `web` | off | `enabled`, `repo`, `branch`, `name`, `relay`, `live`, `share`, `show_tokens`, `show_files`, `show_machines`, `every_seconds` for the README card and website widget |
 | `link_key` | `""` | Same key on each computer = one shared card (`agent-presence link`) |
+| `public_presence` | `"on"` | One switch for every public surface at once — Discord card, website status JSON/SVG, README card: `"on"`, `"off"`, or `"discord"` (follow the local Discord client: not running = nothing public; the gate fails closed) |
 | `show_project`, `show_git`, `show_stats`, `show_streak`, `show_model`, `show_ci`, `show_milestones` | `true` | Turn each line on or off |
 | `show_actions` | `true` | What each agent is doing, and test/build results (off in `"minimal"`) |
 | `show_files` | `false` | "editing foo.py" instead of "editing". Names like `.env`, `id_rsa`, `*.pem` or `secrets.yaml` are never shown |

@@ -179,7 +179,9 @@
     if ((showcase || state === "waiting") && agents.length) {
       html += "<div class='sec'><div class='lbl'>Agents · " + esc(st.headline || "") + "</div><ul>";
       agents.slice(0, 6).forEach(function (a) {
-        var meta = [a.mobile_origin ? "📱 " + a.mobile_origin + " →" : null,
+        // A phone origin is a label on an executing job only: the moment
+        // the agent stops executing, the marker goes with the evidence.
+        var meta = [a.mobile_origin && a.status === "busy" ? "📱 " + a.mobile_origin + " →" : null,
                     a.tool_name, a.project, a.model, a.machine].filter(Boolean).map(esc).join(" · ");
         html += "<li><span class='tag " + (a.status === "busy" ? "busy'>working" : "wait'>waiting") +
                 "</span>" + esc(a.action) + "<div class='m'>" + meta + "</div></li>";
