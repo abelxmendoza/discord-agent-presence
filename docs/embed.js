@@ -5,8 +5,12 @@
  *   <div data-agent-presence="your-user/your-user"></div>
  *   <script src="https://abelxmendoza.github.io/discord-agent-presence/embed.js" async></script>
  *
- * Reads status.json from the agent-presence-status branch of that repo,
- * which `agent-presence web setup` keeps up to date. Optional attributes:
+ * Reads the agent-presence-status branch of that repo, which
+ * `agent-presence web setup` keeps up to date: each machine publishes
+ * its own status.d/<machine-id>.json there, and this widget merges them
+ * (mergeStatuses) so several machines can be live at once, each on its
+ * own evidence. The legacy single status.json is the fallback when no
+ * per-machine files exist. Optional attributes:
  *   data-branch="agent-presence-status"   data-compact   data-theme="light"
  * data-hide="tokens,machines,projects" leaves those parts out on this page.
  * A parent with data-agent-presence-section is unhidden once data loads, so a
@@ -124,9 +128,9 @@
     return n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? Math.round(n / 1e3) + "K" : String(n);
   }
 
-  function load(repo, branch) {
-    var api = "https://api.github.com/repos/" + repo + "/contents/status.json?ref=" + encodeURIComponent(branch);
-    var raw = "https://raw.githubusercontent.com/" + repo + "/" + branch + "/status.json";
+  function fetchJson(repo, branch, path) {
+    var api = "https://api.github.com/repos/" + repo + "/contents/" + path + "?ref=" + encodeURIComponent(branch);
+    var raw = "https://raw.githubusercontent.com/" + repo + "/" + branch + "/" + path;
     // The API is fresh but limited to 60 calls an hour per visitor; raw is cached ~5 min.
     return fetch(api, { headers: { Accept: "application/vnd.github.raw+json" }, cache: "no-store" })
       .then(function (r) { if (!r.ok) throw r; return r.json(); })
@@ -136,6 +140,145 @@
           return r.json();
         });
       });
+  }
+  function load(repo, branch) { return fetchJson(repo, branch, "status.json"); }
+
+  var STATE_RANK = { "vibe-coding": 5, coding: 4, waiting: 3, idle: 2, summary: 1, offline: 0 };
+  function machineOf(st) {
+    var m = arr(st.machines)[0] || {};
+    return {
+      id: st.machine_id || m.id || m.label || "machine",
+      label: m.label || st.machine_id || "Machine",
+      icon: m.icon || "🖥",
+      os: m.os || "",
+      os_full: m.os_full || m.os || "",
+      agents: typeof m.agents === "number" ? m.agents : arr(st.agents).length,
+      last_seen_at: m.last_seen_at || null
+    };
+  }
+
+  // Merge per-machine payloads (status.d/*.json) into one status object
+  // render() can consume. Every payload is judged on its own first, with
+  // the same truth rules as a single status: a machine whose heartbeat
+  // is stale drops out of the merged view entirely — it can neither
+  // hide nor fake the others — and if ALL are stale the result is the
+  // newest snapshot, which validateStatus renders as offline. Only
+  // genuine activity is listed: busy agents from any fresh machine, and
+  // waiting agents only from machines actually in a coding/waiting
+  // state — never a tool merely because it is installed or detected.
+  function mergeStatuses(payloads, now) {
+    var judged = [];
+    (payloads || []).forEach(function (st) {
+      var v = validateStatus(st, now);
+      if (v.ok && !v.demo) judged.push({ st: st, v: v });
+    });
+    if (!judged.length) return null;
+    var fresh = judged.filter(function (j) { return !j.v.stale; });
+    if (!fresh.length) {
+      judged.sort(function (a, b) { return (b.v.ref || 0) - (a.v.ref || 0); });
+      return judged[0].st;
+    }
+    fresh.sort(function (a, b) { return (b.v.ref || 0) - (a.v.ref || 0); });
+    var state = "offline";
+    fresh.forEach(function (j) { if (STATE_RANK[j.v.state] > STATE_RANK[state]) state = j.v.state; });
+    var lead = fresh.filter(function (j) { return j.v.state === state; })[0] || fresh[0];
+    var agents = [], machines = [], seenMachines = {}, tools = [], seenTools = {},
+        projects = [], seenProjects = {}, highlights = [], seenHl = {},
+        anyExecuting = false, anyWaiting = false, human = false, humanUnknown = false,
+        lastActive = null, today = null, streakFrom = null;
+    fresh.forEach(function (j) {
+      var st = j.st, vs = j.v.state;
+      var mach = machineOf(st);
+      if (!seenMachines[mach.id]) { seenMachines[mach.id] = true; machines.push(mach); }
+      if (st.human_active === true) human = true;
+      else if (st.human_active === "unknown") humanUnknown = true;
+      var la = parseTime(st.last_active);
+      if (la !== null && (lastActive === null || la > lastActive)) lastActive = la;
+      arr(st.highlights).forEach(function (h) {
+        if (h && h.key && !seenHl[h.key]) { seenHl[h.key] = true; highlights.push(h); }
+      });
+      if (st.today && typeof st.today === "object") {
+        today = today || { agent_seconds: 0, commits: 0, tokens: 0 };
+        ["agent_seconds", "commits", "tokens"].forEach(function (k) {
+          if (typeof st.today[k] === "number") today[k] += st.today[k];
+        });
+      }
+      var tot = typeof st.streak_days_total === "number" ? st.streak_days_total : -1;
+      if (!streakFrom || tot > streakFrom.tot) streakFrom = { tot: tot, st: st };
+      if (vs !== "vibe-coding" && vs !== "coding" && vs !== "waiting") return;
+      arr(st.agents).forEach(function (a) {
+        if (a.status !== "busy" && a.status !== "waiting") return;
+        var copy = {};
+        for (var k in a) copy[k] = a[k];
+        if (!copy.machine) copy.machine = mach.label;
+        agents.push(copy);
+        if (a.status === "busy") anyExecuting = true; else anyWaiting = true;
+      });
+      arr(st.tools).forEach(function (t) {
+        if (t && t.id && !seenTools[t.id]) { seenTools[t.id] = true; tools.push(t); }
+      });
+      arr(st.projects).forEach(function (p) {
+        if (p && p.name && !seenProjects[p.name]) { seenProjects[p.name] = true; projects.push(p); }
+      });
+    });
+    var nBusy = agents.filter(function (a) { return a.status === "busy"; }).length;
+    var nWait = agents.length - nBusy;
+    var headline = nBusy ? "⚡ " + nBusy + " agent" + (nBusy > 1 ? "s" : "") + " working" +
+                    (nWait ? " · " + nWait + " waiting" : "")
+      : nWait ? "⏳ " + nWait + " agent" + (nWait > 1 ? "s" : "") + " waiting"
+      : "● hands on keyboard";
+    var ref = fresh[0].v.ref;
+    var merged = {
+      v: 2, schema_version: 2,
+      name: lead.st.name || fresh[0].st.name,
+      image: lead.st.image || null,
+      state: state,
+      verb: lead.st.verb, title: lead.st.title, model: lead.st.model,
+      headline: headline,
+      tools: tools, agents: agents.slice(0, 8), projects: projects.slice(0, 4),
+      machines: machines, today: today || {}, highlights: highlights,
+      streak: streakFrom ? (streakFrom.st.streak || 0) : 0,
+      last_active: lastActive !== null ? new Date(lastActive * 1000).toISOString() : null,
+      heartbeat_at: new Date(ref * 1000).toISOString(),
+      published_at: new Date(ref * 1000).toISOString(),
+      updated: ref,
+      machine_reachable: true,
+      agent_executing: anyExecuting, agent_waiting: anyWaiting,
+      human_active: human ? true : humanUnknown ? "unknown" : false,
+      landing: lead.st.landing || fresh[0].st.landing,
+      tracking_since: fresh.map(function (j) { return j.st.tracking_since; })
+        .filter(Boolean).sort()[0] || null
+    };
+    if (streakFrom && streakFrom.tot >= 0) {
+      merged.streak_days_total = streakFrom.st.streak_days_total;
+      if (streakFrom.st.streak_provenance) merged.streak_provenance = streakFrom.st.streak_provenance;
+      if (streakFrom.st.streak_source) merged.streak_source = streakFrom.st.streak_source;
+      if (streakFrom.st.streak_cached) merged.streak_cached = true;
+    }
+    return merged;
+  }
+
+  // The per-machine view: list status.d/ on the branch (one extra API
+  // call), fetch each file, merge. Any failure — no such directory, an
+  // empty one, a rate limit — returns null and the caller falls back to
+  // the legacy single status.json, so the widget never regresses.
+  function loadMachines(repo, branch) {
+    var api = "https://api.github.com/repos/" + repo + "/contents/status.d?ref=" + encodeURIComponent(branch);
+    return fetch(api, { cache: "no-store" }).then(function (r) {
+      if (!r.ok) throw new Error("status " + r.status);
+      return r.json();
+    }).then(function (entries) {
+      var names = (Array.isArray(entries) ? entries : []).filter(function (e) {
+        return e && e.type === "file" && /\.json$/.test(e.name || "");
+      }).slice(0, 8).map(function (e) { return e.name; });
+      if (!names.length) return null;
+      return Promise.all(names.map(function (n) {
+        return fetchJson(repo, branch, "status.d/" + n).catch(function () { return null; });
+      })).then(function (list) {
+        var ok = list.filter(Boolean);
+        return ok.length ? mergeStatuses(ok, Date.now() / 1000) : null;
+      });
+    }).catch(function () { return null; });
   }
 
   function renderUnavailable(root) {
@@ -245,15 +388,22 @@
     var last = null;
     function tick() {
       var sec = el.closest && el.closest("[data-agent-presence-section]");
-      load(repo, branch).then(function (st) {
+      function done(st) {
         last = st; render(root, st, hide); el.hidden = false;
         if (sec) sec.hidden = false;  // a page section that waits for real data
-      }).catch(function () {
+      }
+      function fail() {
         // A failed fetch is itself the truth: no live status is reported.
         // Show the neutral card; if older data exists, the re-render timer
         // keeps showing it with its (now stale) timestamp until it downgrades.
         if (!last) { renderUnavailable(root); el.hidden = false; if (sec) sec.hidden = false; }
-      });
+      }
+      // Per-machine files first (several machines live at once); the
+      // legacy single status.json remains the fallback.
+      loadMachines(repo, branch).then(function (merged) {
+        if (merged) { done(merged); return; }
+        load(repo, branch).then(done).catch(fail);
+      }).catch(function () { load(repo, branch).then(done).catch(fail); });
     }
     tick();
     setInterval(function () { if (!document.hidden) tick(); }, POLL);
@@ -270,7 +420,8 @@
     if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", scan);
     else scan();
   }
-  var api = { scan: scan, render: render, validateStatus: validateStatus, parseTime: parseTime, TTL: TTL };
+  var api = { scan: scan, render: render, validateStatus: validateStatus, parseTime: parseTime, TTL: TTL,
+              mergeStatuses: mergeStatuses, loadMachines: loadMachines };
   if (typeof window !== "undefined") window.AgentPresence = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;  // unit tests under Node
 })();

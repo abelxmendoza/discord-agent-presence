@@ -1112,8 +1112,286 @@ def ci_status(slug, branch):
 
 
 # --------------------------------------------------------------- streak ----
+# The coding streak is a UNION of evidenced sources, deduplicated by
+# calendar day in America/Los_Angeles (docs/presence-truth-model.md):
+#   "github"              commits authored by you pushed to GitHub
+#                         (commit search + recent events, token-authenticated)
+#   "local-git:<machine>" commits authored by you in that machine's local
+#                         git repos, pushed or not (git log --all --author)
+#   "daemon:<machine>"    days that machine's daemon itself observed live
+#                         coding activity (its habit log / day log)
+# Every day in the union names at least one source. GitHub is authoritative
+# for what it covers, but its silence never erases a locally evidenced day:
+# you can code without pushing. A machine that was offline contributes its
+# local days when it next publishes — its packet carries them (see
+# machine_status) and peers keep them in a small cache. Local day counters
+# alone are never a source of truth by themselves: daemon days are only the
+# secondary, observational source, and if GitHub is unreachable its last
+# fetched days are used and the result is marked cached.
+
+STREAK_GH_CACHE = STATE_DIR / "github-days.json"
+STREAK_PEER_CACHE = STATE_DIR / "peer-days.json"
+STREAK_UNION_FILE = STATE_DIR / "streak-union.json"
+STREAK_GH_REFRESH = 6 * 3600     # GitHub is re-read at most this often
+STREAK_PACKET_DAYS = 400         # local days a machine packet may carry
+
+
+def _la_tz():
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo("America/Los_Angeles")
+    except Exception:  # no tzdata (e.g. stock Windows): fixed standard offset
+        from datetime import timezone
+        return timezone(timedelta(hours=-8))
+
+
+def _la_day(ts):
+    """The America/Los_Angeles calendar date (ISO) of an epoch timestamp."""
+    from datetime import datetime
+    return datetime.fromtimestamp(ts, tz=_la_tz()).date().isoformat()
+
+
+def _gh_get(token, path):
+    """One authenticated GitHub API GET; None on any failure."""
+    try:
+        return github_call(token, "GET", path, timeout=20)
+    except Exception:
+        return None
+
+
+def github_login(cfg, token):
+    """The GitHub account the streak belongs to: the token's owner, else
+    the owner of the web repo being published to."""
+    me = _gh_get(token, "/user") or {}
+    if me.get("login"):
+        return me["login"]
+    repo = web_cfg(cfg).get("repo") or ""
+    return repo.split("/")[0] if "/" in repo else None
+
+
+def _push_event_days(cfg, token, login):
+    """Recent GitHub days from the events feed. A PushEvent lists no
+    commits any more, so each push's head commit is resolved and must be
+    authored by the account for the day to count. Pushes to this tool's
+    own branches (status, peer relay) are skipped: their commits are the
+    tool's, not coding."""
+    days = set()
+    for page in (1, 2, 3):
+        events = _gh_get(token, f"/users/{login}/events?per_page=100&page={page}")
+        if not isinstance(events, list) or not events:
+            break
+        for ev in events:
+            if ev.get("type") != "PushEvent":
+                continue
+            payload = ev.get("payload") or {}
+            ref = payload.get("ref") or ""
+            if "/agent-presence" in ref:
+                continue
+            slug = (ev.get("repo") or {}).get("name")
+            head = payload.get("head")
+            if not slug or not head:
+                continue
+            commit = _gh_get(token, f"/repos/{slug}/commits/{head}") or {}
+            author = commit.get("author") or {}
+            c_author = (commit.get("commit") or {}).get("author") or {}
+            mine = (author.get("login") == login
+                    or login in (c_author.get("email") or ""))
+            if not mine:
+                continue
+            try:
+                ts = _ts_of(ev.get("created_at"))
+            except Exception:
+                ts = None
+            if ts:
+                days.add(_la_day(ts))
+    return days
+
+
+def _search_commit_days(token, login, first_year):
+    """Full-history GitHub days: commit search, one window per year.
+    The day is the commit's AUTHOR date in America/Los_Angeles — when
+    the work was written, not when it happened to be pushed."""
+    days = set()
+    this_year = date.today().year
+    for year in range(first_year, this_year + 1):
+        page = 1
+        while page <= 10:  # the search API caps a query at 1000 results
+            q = (f"author:{login}+committer-date:{year}-01-01..{year}-12-31"
+                 f"&per_page=100&page={page}")
+            data = _gh_get(token, f"/search/commits?q={q}")
+            items = (data or {}).get("items")
+            if not isinstance(items, list) or not items:
+                break
+            for item in items:
+                when = ((item.get("commit") or {}).get("author") or {}).get("date")
+                ts = _ts_of(when)
+                if ts:
+                    days.add(_la_day(ts))
+            if len(items) < 100:
+                break
+            page += 1
+    return days
+
+
+def github_days(cfg):
+    """({ISO day, ...}, cached?) for the "github" streak source, or
+    (None, False) when GitHub has never been reachable. Results are
+    cached in STREAK_GH_CACHE and refreshed at most every
+    STREAK_GH_REFRESH; a failed refresh serves the cache, marked."""
+    cache = {}
+    try:
+        cache = json.loads(STREAK_GH_CACHE.read_text())
+    except (OSError, ValueError):
+        pass
+    days = set(cache.get("days") or [])
+    if time.time() - (cache.get("fetched_at") or 0) < STREAK_GH_REFRESH and days:
+        return days, False
+    token = github_token(cfg)
+    login = github_login(cfg, token) if token else None
+    if not token or not login:
+        return (days, True) if days else (None, False)
+    fresh = _push_event_days(cfg, token, login)
+    me = _gh_get(token, f"/users/{login}") or {}
+    created = _ts_of(me.get("created_at"))
+    first_year = date.fromtimestamp(created).year if created else date.today().year - 5
+    fresh |= _search_commit_days(token, login, first_year)
+    if not fresh and days:
+        return days, True  # unreachable right now: serve the cache, marked
+    days |= fresh
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        STREAK_GH_CACHE.write_text(json.dumps(
+            {"days": sorted(days), "fetched_at": time.time(), "login": login}))
+    except OSError:
+        pass
+    return days, False
+
+
+def commit_days_ts(root):
+    """Epoch timestamps of your commits in one local repo, all branches,
+    pushed or not (the local-git streak source). Author-filtered, so the
+    walk stays cheap even in large repos."""
+    def fetch():
+        out = run("git", "log", "--all", "--format=%ct", f"--author={git_user_email()}",
+                  cwd=root)
+        return [int(x) for x in out.splitlines() if x.strip().isdigit()]
+    return cached(CACHE, ("days_ts", root), 3600, fetch)
+
+
+def local_streak_days(cfg, roots):
+    """{ISO day: [source, ...]} from THIS machine's local evidence:
+    its git repos (including unpushed commits) and the days its own
+    daemon observed live coding. Sources are labelled with this
+    machine's id, so a day keeps its provenance wherever it travels."""
+    mid = machine_id()
+    out = {}
+    git_src = f"local-git:{mid}"
+    for r in roots:
+        for ts in commit_days_ts(r):
+            out.setdefault(_la_day(ts), set()).add(git_src)
+    daemon_src = f"daemon:{mid}"
+    active = {d for d, rec in load_habits().items()
+              if rec.get("active_minutes") or rec.get("commits")}
+    try:
+        active |= set(json.loads((STATE_DIR / "days.json").read_text()))
+    except (OSError, ValueError):
+        pass
+    for d in active:
+        out.setdefault(d, set()).add(daemon_src)
+    return {d: sorted(srcs) for d, srcs in out.items()}
+
+
+def load_peer_days():
+    """{machine id: {ISO day: [sources]}} learned from linked machines.
+    A machine's local days join the union when it next publishes; this
+    cache keeps them afterwards."""
+    try:
+        data = json.loads(STREAK_PEER_CACHE.read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_peer_days(peers_days):
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        STREAK_PEER_CACHE.write_text(json.dumps(peers_days))
+    except OSError:
+        pass
+
+
+def union_streak_days(source_maps):
+    """Pure union of {source: {ISO day, ...}} (or {day: [sources]} maps
+    keyed by source) -> the streak info dict. Every day keeps the names
+    of the sources that evidence it."""
+    by_day = {}
+    for source, days in source_maps.items():
+        if isinstance(days, dict):  # a {day: [sources]} packet map
+            for d, srcs in days.items():
+                by_day.setdefault(d, set()).update(srcs or [source])
+        else:
+            for d in days or ():
+                by_day.setdefault(d, set()).add(source)
+    day_set = set(by_day)
+    current, best = _streaks(day_set)
+    provenance = {}
+    for srcs in by_day.values():
+        for s in srcs:
+            provenance[s] = provenance.get(s, 0) + 1
+    return {"current": current, "best": best, "total": len(day_set),
+            "days": {d: sorted(srcs) for d, srcs in sorted(by_day.items())},
+            "provenance": provenance}
+
+
+_streak_memo = {}
+
+
+def streak_union(cfg, roots, peer_maps=None):
+    """This machine's view of the streak union: GitHub days, this
+    machine's local days, and linked machines' local days (from their
+    packets, via peer_maps / the peer cache). Memoised briefly — the
+    main loop ticks far more often than the evidence changes."""
+    key = (tuple(sorted(roots)), tuple(sorted((peer_maps or {}).keys())))
+    hit = _streak_memo.get("v")
+    if hit and time.time() - hit[0] < 120 and hit[1] == key:
+        return hit[2]
+    maps = {}
+    gh, gh_cached = github_days(cfg)
+    if gh:
+        maps["github"] = gh
+    own = local_streak_days(cfg, roots)
+    if own:
+        maps[f"local:{machine_id()}"] = own
+    known = load_peer_days()
+    for mid, days in (peer_maps or {}).items():
+        if days:
+            known[mid] = days
+    if peer_maps:
+        save_peer_days(known)
+    for mid, days in known.items():
+        if mid != machine_id() and days:
+            maps[f"peer:{mid}"] = days
+    info = union_streak_days(maps)
+    info["github_cached"] = bool(gh_cached)
+    try:  # the computed union, with per-day provenance, is kept on disk
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        prev = {}
+        try:
+            prev = json.loads(STREAK_UNION_FILE.read_text())
+        except (OSError, ValueError):
+            pass
+        STREAK_UNION_FILE.write_text(json.dumps({
+            **info, "computed_at": _iso_utc(time.time()),
+            "record_celebrated_best": prev.get("record_celebrated_best", 0)}))
+    except OSError:
+        pass
+    _streak_memo["v"] = (time.time(), key, info)
+    return info
+
 
 def update_streak(live_today, roots):
+    """Deprecated: the day-counter streak. Kept for compatibility; the
+    union in streak_union() is the source the cards and web now use."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     path = STATE_DIR / "days.json"
     try:
@@ -1252,8 +1530,12 @@ def commit_times(root, since):
     return cached(CACHE, ("ctimes", root, since), 60, fetch)
 
 
-def milestones(cfg, s, streak):
-    """Recent achievements for this card, newest first: [(text, badge)]."""
+def milestones(cfg, s, streak, best=None):
+    """Recent achievements for this card, newest first: [(text, badge)].
+
+    With `best` (the union streak's longest run), the record comes from
+    the streak union and record.json is neither read nor written: the
+    union is the record. Without it, the legacy day-log record applies."""
     hidden, window, now = set(cfg["hide_projects"]), cfg["milestone_seconds"], time.time()
     found = []
     roots = [r for p, r in s["roots"].items() if p not in hidden]
@@ -1266,22 +1548,44 @@ def milestones(cfg, s, streak):
             if len(times) >= n and now - times[n - 1] < window:
                 found.append((times[n - 1], f"🏆 {n}th commit {label}", "streak_big"))
 
-    # A new longest streak (the record is kept next to the day log).
-    rec_path = STATE_DIR / "record.json"
-    try:
-        rec = json.loads(rec_path.read_text())
-    except (OSError, ValueError):
-        rec = {"best": 0, "set_at": 0}
-    if streak > rec["best"]:
-        if rec["best"]:  # don't celebrate the very first run
-            rec["set_at"] = now
-        rec["best"] = streak
+    if best is not None:
+        # Celebrate a union record once, when the current streak reaches
+        # a best never celebrated before (bookkeeping only — the streak
+        # itself comes from the union's evidenced days, never from this).
         try:
-            rec_path.write_text(json.dumps(rec))
-        except OSError:
-            pass
-    if rec.get("set_at") and now - rec["set_at"] < window:
-        found.append((rec["set_at"], f"🔥 new record: {streak}-day streak", "streak_big"))
+            union = json.loads(STREAK_UNION_FILE.read_text())
+        except (OSError, ValueError):
+            union = {}
+        celebrated = union.get("record_celebrated_best") or 0
+        if streak >= best >= 7 and best > celebrated:
+            union["record_celebrated_best"] = best
+            union["record_celebrated_at"] = now
+            try:
+                STREAK_UNION_FILE.write_text(json.dumps(union))
+            except OSError:
+                pass
+            celebrated = best
+        if celebrated and union.get("record_celebrated_at") and \
+                now - union["record_celebrated_at"] < window and streak >= celebrated:
+            found.append((union["record_celebrated_at"],
+                          f"🔥 new record: {streak}-day streak", "streak_big"))
+    else:
+        # A new longest streak (the record is kept next to the day log).
+        rec_path = STATE_DIR / "record.json"
+        try:
+            rec = json.loads(rec_path.read_text())
+        except (OSError, ValueError):
+            rec = {"best": 0, "set_at": 0}
+        if streak > rec["best"]:
+            if rec["best"]:  # don't celebrate the very first run
+                rec["set_at"] = now
+            rec["best"] = streak
+            try:
+                rec_path.write_text(json.dumps(rec))
+            except OSError:
+                pass
+        if rec.get("set_at") and now - rec["set_at"] < window:
+            found.append((rec["set_at"], f"🔥 new record: {streak}-day streak", "streak_big"))
 
     # Your pull requests merged on public GitHub repos.
     for p, r in s["roots"].items():
@@ -1492,7 +1796,7 @@ def masked_projects(cfg, s):
         s, p, next((a for a in s["agents"] if a.get("project") == p), None))}
 
 
-def card_lines(cfg, tool, s, streak, machines=None, switched=None):
+def card_lines(cfg, tool, s, streak, machines=None, switched=None, best=None):
     """Every line this card can rotate through, as dicts of
     text / party ("(2 of 3)") / badge (small image) / hover (its tooltip)."""
     hidden = set(cfg["hide_projects"])
@@ -1510,7 +1814,7 @@ def card_lines(cfg, tool, s, streak, machines=None, switched=None):
 
     # 0. Fresh milestones go first, so they're the next thing shown.
     if cfg["show_milestones"]:
-        for text, badge in milestones(cfg, s, streak)[:2]:
+        for text, badge in milestones(cfg, s, streak, best)[:2]:
             add(text, badge)
 
     # 1. Agent headline, with Discord's "(2 of 3)" party counter.
@@ -1614,7 +1918,7 @@ def card_lines(cfg, tool, s, streak, machines=None, switched=None):
     return lines, top, slug
 
 
-def build_activity(cfg, tool, s, totals, streak, tick, machines=None, switched=None):
+def build_activity(cfg, tool, s, totals, streak, tick, machines=None, switched=None, best=None):
     masked = masked_projects(cfg, s)
     projects = list(dict.fromkeys(
         "private project" if p in masked else p for p in s["projects"]))
@@ -1628,7 +1932,7 @@ def build_activity(cfg, tool, s, totals, streak, tick, machines=None, switched=N
     else:
         details = f"Building with {TOOL_NAMES[tool]}"
 
-    lines, top, slug = card_lines(cfg, tool, s, streak, machines, switched)
+    lines, top, slug = card_lines(cfg, tool, s, streak, machines, switched, best)
     line = lines[tick % len(lines)]
 
     kind = PLAYING
@@ -1866,11 +2170,21 @@ def machine_status(cfg, live):
                  "projects": [p for p in s["projects"] if p not in hidden][:4]}
              for t, s in live.items()}
     idle = input_idle()
+    # This machine's local streak evidence travels with the packet, so a
+    # machine that was offline adds its days to the union when it next
+    # publishes (the streak itself is computed in streak_union()).
+    roots = {r for s in live.values() for r in s.get("roots", {}).values()}
+    try:
+        local_days = local_streak_days(cfg, roots)
+    except Exception:
+        local_days = {}
+    cutoff = (date.today() - timedelta(days=STREAK_PACKET_DAYS)).isoformat()
+    packet_days = {d: srcs for d, srcs in local_days.items() if d >= cutoff}
     return {"v": 1, "id": m["id"], "name": cfg.get("machine_name") or "", "model": m["model"],
             "chip": m["chip"], "kind": m["kind"], "os": m["os"], "os_full": m["os_full"],
             "idle": None if idle is None else round(idle, 1), "discord": discord_running(),
             "web": bool(web_cfg(cfg)["enabled"] and web_cfg(cfg)["repo"]),
-            "agents": agents[:12], "tools": tools}
+            "agents": agents[:12], "tools": tools, "streak_days": packet_days}
 
 
 class Sealer:
@@ -2092,7 +2406,8 @@ def machines_summary(me, peers, cfg):
         in_use = idle is not None and idle < IN_USE_SECONDS
         if not (agents or in_use or p is me):
             continue
-        out.append({"label": (cfg.get("machine_name") if p is me else p.get("name")) or p["model"],
+        out.append({"id": p.get("id"),
+                    "label": (cfg.get("machine_name") if p is me else p.get("name")) or p["model"],
                     "icon": machine_icon(p), "os": p.get("os", ""), "os_full": p.get("os_full", ""),
                     "agents": len(agents), "busy": sum(a["status"] == "busy" for a in agents),
                     "in_use": in_use, "me": p is me,
@@ -2476,15 +2791,11 @@ def github_call(token, method, path, body=None, timeout=15):
         return json.loads(data) if data else {}
 
 
-def publish_files(token, repo, branch, files):
-    """Point `branch` at one new parentless commit holding `files`."""
-    tree = github_call(token, "POST", f"/repos/{repo}/git/trees", {"tree": [
-        {"path": name, "mode": "100644", "type": "blob", "content": content}
-        for name, content in files.items()]})
+def _point_branch_at_tree(token, repo, branch, tree_sha):
     day = time.strftime("%Y-%m-%dT00:00:00Z", time.gmtime())  # the day, not the minute
     who = {"name": "agent-presence", "email": "agent-presence@users.noreply.github.com", "date": day}
     commit = github_call(token, "POST", f"/repos/{repo}/git/commits", {
-        "message": "agent-presence status", "tree": tree["sha"], "parents": [],
+        "message": "agent-presence status", "tree": tree_sha, "parents": [],
         "author": who, "committer": who})
     try:
         github_call(token, "PATCH", f"/repos/{repo}/git/refs/heads/{branch}",
@@ -2494,6 +2805,45 @@ def publish_files(token, repo, branch, files):
             raise
         github_call(token, "POST", f"/repos/{repo}/git/refs",
                     {"ref": f"refs/heads/{branch}", "sha": commit["sha"]})
+
+
+def publish_files(token, repo, branch, files):
+    """Point `branch` at one new parentless commit holding `files`."""
+    tree = github_call(token, "POST", f"/repos/{repo}/git/trees", {"tree": [
+        {"path": name, "mode": "100644", "type": "blob", "content": content}
+        for name, content in files.items()]})
+    _point_branch_at_tree(token, repo, branch, tree["sha"])
+
+
+def publish_files_union(token, repo, branch, files, keep_prefix="status.d/"):
+    """publish_files, except blobs already on the branch under
+    `keep_prefix` that this publish doesn't replace are carried into
+    the new tree by SHA. Several machines publish their own
+    status.d/<machine-id>.json to the same branch; a plain replace
+    would erase the others' files on every publish. If the branch
+    exists but its tree cannot be read, this raises rather than risk
+    wiping another machine's file (callers log and skip the publish)."""
+    entries = []
+    try:
+        ref = github_call(token, "GET", f"/repos/{repo}/git/refs/heads/{branch}")
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise
+        ref = None
+    if ref:
+        commit = github_call(token, "GET",
+                             f"/repos/{repo}/git/commits/{ref['object']['sha']}")
+        tree = github_call(token, "GET",
+                           f"/repos/{repo}/git/trees/{commit['tree']['sha']}?recursive=1")
+        for e in tree.get("tree", []):
+            if e.get("type") == "blob" and e["path"].startswith(keep_prefix) \
+                    and e["path"] not in files:
+                entries.append({"path": e["path"], "mode": e.get("mode", "100644"),
+                                "type": "blob", "sha": e["sha"]})
+    entries += [{"path": name, "mode": "100644", "type": "blob", "content": content}
+                for name, content in files.items()]
+    tree = github_call(token, "POST", f"/repos/{repo}/git/trees", {"tree": entries})
+    _point_branch_at_tree(token, repo, branch, tree["sha"])
 
 
 def strip_file(action):
@@ -2589,7 +2939,7 @@ def load_job_origins():
     return out
 
 
-def web_status(cfg, live, machines=None, streak=0, state=None, habits=None):
+def web_status(cfg, live, machines=None, streak=0, state=None, habits=None, streak_info=None):
     """What the README card and website widget show. Built to be public:
     private repos are unnamed and OS is major-version only.
 
@@ -2619,6 +2969,30 @@ def web_status(cfg, live, machines=None, streak=0, state=None, habits=None):
            "highlights": web_highlights(cfg, h), "landing": LANDING_URL}
     if top and "top_project" in w["share"] and top[0] in saved.get("public_projects", []):
         out["highlights"].append({"key": "top_project", "value": top[0], "label": "top project, 7 days"})
+    if streak_info is not None:
+        # The streak is the union of evidenced sources (GitHub + local
+        # git + daemon observation), never the local day counters: it
+        # replaces the habit-log streak everywhere it would render.
+        out["streak"] = streak_info["current"]
+        out["streak_source"] = "union"
+        out["streak_days_total"] = streak_info["total"]
+        out["streak_provenance"] = streak_info["provenance"]
+        if streak_info.get("github_cached"):
+            out["streak_cached"] = True
+        share = set(w["share"])
+        kept = [h for h in out["highlights"]
+                if h["key"] not in ("streak", "best_streak", "active_days")]
+        union_hl = []
+        if "streak" in share and streak_info["current"] >= 2:
+            union_hl.append({"key": "streak", "value": f"{streak_info['current']} days",
+                             "label": "coding streak"})
+        if "best_streak" in share and streak_info["best"] >= 3:
+            union_hl.append({"key": "best_streak", "value": f"{streak_info['best']} days",
+                             "label": "best streak"})
+        if "active_days" in share and streak_info["total"] >= 3:
+            union_hl.append({"key": "active_days", "value": str(streak_info["total"]),
+                             "label": "days coded"})
+        out["highlights"] = union_hl + kept
     if not live or state == "offline" or not w["live"]:
         out["state"] = state or ("idle" if w["live"] else "summary")
         out["updated"] = int(_midnight())  # legacy field: no exact "went offline at" time
@@ -2706,6 +3080,7 @@ def web_status(cfg, live, machines=None, streak=0, state=None, habits=None):
     saved["public_projects"] = sorted(set(saved.get("public_projects", [])) | {p for p, ok in public.items() if ok})[-50:]
     if w["show_machines"]:
         out["machines"] = [{"label": x["label"], "icon": x["icon"], "os": x["os"], "agents": x["agents"],
+                            **({"id": x["id"]} if x.get("id") else {}),
                             **({"last_seen_at": x["last_seen_at"]} if x.get("last_seen_at") else {})}
                            for x in machines or []]
     stats = today_stats()
@@ -2819,21 +3194,30 @@ class WebPublisher:
         self.last_sig, self.last_at, self.busy = None, 0, threading.Lock()
         self.thread_cls = threading.Thread
 
-    def publish(self, st):
+    def publish(self, st, own=None):
+        """Publish the combined status.json/status.svg — and, when `own`
+        (this machine's own web_status) is given, this machine's
+        per-machine file status.d/<machine-id>.json alongside it. The
+        union publish preserves other machines' status.d files: on a
+        shared branch, no publisher may erase a machine it isn't."""
         token = github_token(self.cfg)
         if not token or not self.repo:
             log("web: no GitHub token or repo; run `agent-presence web setup`")
             return False
+        files = {"status.json": json.dumps(st, ensure_ascii=False, indent=1) + "\n",
+                 "status.svg": render_svg(st) + "\n"}
+        if own is not None:
+            own = {**own, "machine_id": machine_id()}
+            files[f"status.d/{machine_id()}.json"] = \
+                json.dumps(own, ensure_ascii=False, indent=1) + "\n"
         try:
-            publish_files(token, self.repo, self.branch,
-                          {"status.json": json.dumps(st, ensure_ascii=False, indent=1) + "\n",
-                           "status.svg": render_svg(st) + "\n"})
+            publish_files_union(token, self.repo, self.branch, files)
             return True
         except Exception as e:
             log("web: publish failed:", repr(e))
             return False
 
-    def update(self, st):
+    def update(self, st, own=None):
         now, sig = time.time(), _web_signature(st)
         due = now - self.last_at >= max(60, self.w["every_seconds"])
         changed = sig != self.last_sig and now - self.last_at >= 30
@@ -2842,7 +3226,7 @@ class WebPublisher:
 
         def go():
             try:
-                if self.publish(st):
+                if self.publish(st, own):
                     self.last_sig, self.last_at = sig, time.time()
                 else:
                     self.last_at = time.time()  # back off a full interval after a failure
@@ -3047,14 +3431,14 @@ def probe_discord(conns):
                     pass
 
 
-def gated_web_status(cfg, conns, live, machines=None, streak=0):
+def gated_web_status(cfg, conns, live, machines=None, streak=0, streak_info=None):
     """The status the web publisher may show right now: the real one only
     while the gate is open; otherwise the neutral offline status, freshly
     published so the website goes quiet at once instead of coasting on the
     consumer's staleness TTL."""
     if public_gate(cfg, conns):
-        return web_status(cfg, live, machines, streak)
-    return web_status(cfg, {}, state="offline")
+        return web_status(cfg, live, machines, streak, streak_info=streak_info)
+    return web_status(cfg, {}, state="offline", streak_info=streak_info)
 
 
 # --------------------------------------------------------------- main ----
@@ -3091,17 +3475,21 @@ def plan_cards(cfg, live, own):
     return cards
 
 
-def activities(cfg, tick, live=None, own=None, machines=None, switched=None):
+def activities(cfg, tick, live=None, own=None, machines=None, switched=None, streak_info=None):
     live = snapshot(cfg) if live is None else live
     own = set(client_ids(cfg)) - {"combined"} if own is None else own
     roots = {r for s in live.values() for p, r in s["roots"].items()
              if p not in cfg["hide_projects"]}
-    streak = update_streak(bool(live), roots) if cfg["show_streak"] else 0
+    if cfg["show_streak"]:
+        sinfo = streak_info if streak_info is not None else streak_union(cfg, roots)
+        streak, best = sinfo["current"], sinfo["best"]
+    else:
+        streak, best = 0, None
     totals = {"agents": sum(len(s["agents"]) for s in live.values()), "tools": len(live)}
     cards = plan_cards(cfg, live, own)
     if machines is None:
         machines = machines_summary(machine_status(cfg, {}), [], cfg)
-    return ({k: build_activity(cfg, tool, st, totals, streak, tick, machines, switched)
+    return ({k: build_activity(cfg, tool, st, totals, streak, tick, machines, switched, best)
              for k, (tool, st) in cards.items()}, cards)
 
 
@@ -3156,7 +3544,8 @@ def main():
         _loop(cfg, conns, link, web, relay)
     finally:
         if web and leader_is_me.get("web", True):  # logging out / shutting down
-            web.publish(web_status(cfg, {}, state="offline"))
+            web.publish(web_status(cfg, {}, state="offline"),
+                        own=web_status(cfg, {}, state="offline"))
 
 
 leader_is_me = {}
@@ -3202,16 +3591,24 @@ def _loop(cfg, conns, link, web, relay=None):
                 machines = machines_summary(me, peers, cfg)
                 here = next(m["label"] for m in machines if m["me"])
                 switched = here if time.time() - switched_at < 120 and switched_from else None
+                own_live = live  # this computer only, before peers merge in
+                own_roots = {r for st in own_live.values() for p, r in st["roots"].items()
+                             if p not in cfg["hide_projects"]}
+                peer_maps = {p["id"]: p["streak_days"] for p in peers if p.get("streak_days")}
+                sinfo = streak_union(cfg, own_roots, peer_maps) if cfg["show_streak"] else None
                 live = merge_peers(live, peers)
                 if leader == me["id"] and gate:  # gate closed = cards cleared below
                     acts, cards = activities(cfg, tick, live, set(conns) - {"combined"},
-                                             machines, switched)
+                                             machines, switched, streak_info=sinfo)
                 if publish:
-                    roots = {r for st in live.values() for p, r in st["roots"].items()
-                             if p not in cfg["hide_projects"]}
+                    own_st = gated_web_status(cfg, conns, own_live,
+                                              machines_summary(me, [], cfg),
+                                              sinfo["current"] if sinfo else 0,
+                                              streak_info=sinfo)
                     web.update(gated_web_status(cfg, conns, live, machines,
-                                                update_streak(bool(live), roots)
-                                                if cfg["show_streak"] else 0))
+                                                sinfo["current"] if sinfo else 0,
+                                                streak_info=sinfo),
+                               own=own_st)
         except Exception as e:  # never let a parsing hiccup kill the cards
             log("snapshot failed:", repr(e))
             time.sleep(cfg["poll_seconds"])
