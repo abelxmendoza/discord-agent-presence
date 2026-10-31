@@ -738,10 +738,10 @@ AP.render(root, { state: "waiting", heartbeat_at: freshIso(), agents: [{ status:
 if (/📱/.test(root.innerHTML)) { fails++; console.log("FAIL origin while waiting"); }
 console.log(fails ? "CONSUMER FAILURES: " + fails : "consumer ok");
 process.exit(fails ? 1 : 0);
-""")
+""", encoding="utf-8")
         import subprocess
         r = subprocess.run(["node", str(script), str(Path(__file__).resolve().parent.parent / "docs" / "embed.js")],
-                           capture_output=True, text=True, timeout=60)
+                           capture_output=True, text=True, encoding="utf-8", timeout=60)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
@@ -1270,10 +1270,10 @@ m = AP.mergeStatuses([ageingBusy, freshIdle], NOW + 30);
 eq(AP.validateStatus(m, NOW + 30).state, "idle", "g: busy machine drops out once stale");
 console.log(fails ? "MERGE FAILURES: " + fails : "merge ok");
 process.exit(fails ? 1 : 0);
-""")
+""", encoding="utf-8")
         import subprocess
         r = subprocess.run(["node", str(script), str(Path(__file__).resolve().parent.parent / "docs" / "embed.js")],
-                           capture_output=True, text=True, timeout=60)
+                           capture_output=True, text=True, encoding="utf-8", timeout=60)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
