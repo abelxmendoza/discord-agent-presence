@@ -738,10 +738,10 @@ AP.render(root, { state: "waiting", heartbeat_at: freshIso(), agents: [{ status:
 if (/📱/.test(root.innerHTML)) { fails++; console.log("FAIL origin while waiting"); }
 console.log(fails ? "CONSUMER FAILURES: " + fails : "consumer ok");
 process.exit(fails ? 1 : 0);
-""")
+""", encoding="utf-8")
         import subprocess
         r = subprocess.run(["node", str(script), str(Path(__file__).resolve().parent.parent / "docs" / "embed.js")],
-                           capture_output=True, text=True, timeout=60)
+                           capture_output=True, text=True, encoding="utf-8", timeout=60)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
@@ -1252,12 +1252,28 @@ const idleWithWaiting = payload("mac1", "MacBook Pro", "idle",
 m = AP.mergeStatuses([backend, idleWithWaiting], NOW);
 eq(m.agents.length, 1, "e: idle machine's waiting agent is not listed");
 eq(m.machines.length, 2, "e: idle machine itself still shows as a machine");
+
+// (f) Top-level execution evidence survives the merge.
+const flagOnly = payload("mac1", "MacBook Pro", "coding", [], 5, { agent_executing: true });
+eq(AP.validateStatus(flagOnly, NOW).state, "coding", "f: flag-only payload is live on its own");
+m = AP.mergeStatuses([flagOnly], NOW);
+eq(m.agent_executing, true, "f: merge keeps agent_executing");
+eq(AP.validateStatus(m, NOW).state, "coding", "f: merged flag-only payload stays live");
+
+// (g) Re-merging later judges each machine on its own heartbeat: a fresh
+// idle machine can't keep an ageing busy one live.
+const ageingBusy = payload("mac1", "MacBook Pro", "coding", [{ status: "busy", action: "x" }], AP.TTL - 10);
+const freshIdle = payload("scythe1", "scythe", "idle", [], 0);
+m = AP.mergeStatuses([ageingBusy, freshIdle], NOW);
+eq(AP.validateStatus(m, NOW).state, "coding", "g: busy machine live while fresh");
+m = AP.mergeStatuses([ageingBusy, freshIdle], NOW + 30);
+eq(AP.validateStatus(m, NOW + 30).state, "idle", "g: busy machine drops out once stale");
 console.log(fails ? "MERGE FAILURES: " + fails : "merge ok");
 process.exit(fails ? 1 : 0);
-""")
+""", encoding="utf-8")
         import subprocess
         r = subprocess.run(["node", str(script), str(Path(__file__).resolve().parent.parent / "docs" / "embed.js")],
-                           capture_output=True, text=True, timeout=60)
+                           capture_output=True, text=True, encoding="utf-8", timeout=60)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 

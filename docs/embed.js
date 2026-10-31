@@ -30,7 +30,8 @@
   "use strict";
   var TTL = 150;           // heartbeat freshness budget, seconds (truth model)
   var SKEW = 60;           // a heartbeat further ahead than this is untrusted
-  var POLL = 120 * 1000;
+  var POLL = 120 * 1000;   // fetch at least this often
+  var MIN_POLL = 20 * 1000; // and never more often than this
   var STATES = ["vibe-coding", "coding", "waiting", "idle", "offline", "summary"];
 
   var CSS = [
@@ -206,6 +207,9 @@
       var tot = typeof st.streak_days_total === "number" ? st.streak_days_total : -1;
       if (!streakFrom || tot > streakFrom.tot) streakFrom = { tot: tot, st: st };
       if (vs !== "vibe-coding" && vs !== "coding" && vs !== "waiting") return;
+      // Top-level flags count as evidence too, as validateStatus allows.
+      if (st.agent_executing === true && vs !== "waiting") anyExecuting = true;
+      if (st.agent_waiting === true) anyWaiting = true;
       arr(st.agents).forEach(function (a) {
         if (a.status !== "busy" && a.status !== "waiting") return;
         var copy = {};
@@ -276,7 +280,7 @@
         return fetchJson(repo, branch, "status.d/" + n).catch(function () { return null; });
       })).then(function (list) {
         var ok = list.filter(Boolean);
-        return ok.length ? mergeStatuses(ok, Date.now() / 1000) : null;
+        return ok.length ? ok : null;  // raw payloads: merged at each render
       });
     }).catch(function () { return null; });
   }
@@ -385,30 +389,53 @@
     var root = el.attachShadow ? el.attachShadow({ mode: "open" }) : el;
     var hide = {};
     (el.getAttribute("data-hide") || "").split(",").forEach(function (k) { if (k.trim()) hide[k.trim()] = true; });
-    var last = null;
+    var last = null, payloads = null, timer = null;
+    // Re-merged on every render, so each machine is judged on its own
+    // heartbeat as time passes: one fresh machine can't keep another live.
+    function current() {
+      return payloads ? mergeStatuses(payloads, Date.now() / 1000) : last;
+    }
+    // Fetch again when the shown heartbeat is about to go stale (the
+    // publisher has a newer one by then), and at least every POLL.
+    function schedule() {
+      clearTimeout(timer);
+      var now = Date.now() / 1000, wait = POLL;
+      (payloads || (last ? [last] : [])).forEach(function (st) {
+        var v = validateStatus(st, now);  // the first fresh heartbeat to expire
+        if (v.ok && !v.stale && v.ref) wait = Math.min(wait, (v.ref + TTL - now) * 1000);
+      });
+      timer = setTimeout(function () { if (document.hidden) schedule(); else tick(); },
+                         Math.max(MIN_POLL, wait));
+    }
     function tick() {
       var sec = el.closest && el.closest("[data-agent-presence-section]");
-      function done(st) {
-        last = st; render(root, st, hide); el.hidden = false;
+      function show() {
+        var st = current();
+        if (!st) { fail(); return; }
+        render(root, st, hide); el.hidden = false;
         if (sec) sec.hidden = false;  // a page section that waits for real data
       }
+      function done(st) { last = st; payloads = null; show(); schedule(); }
       function fail() {
         // A failed fetch is itself the truth: no live status is reported.
         // Show the neutral card; if older data exists, the re-render timer
         // keeps showing it with its (now stale) timestamp until it downgrades.
-        if (!last) { renderUnavailable(root); el.hidden = false; if (sec) sec.hidden = false; }
+        if (!last && !payloads) { renderUnavailable(root); el.hidden = false; if (sec) sec.hidden = false; }
+        schedule();
       }
       // Per-machine files first (several machines live at once); the
       // legacy single status.json remains the fallback.
-      loadMachines(repo, branch).then(function (merged) {
-        if (merged) { done(merged); return; }
+      loadMachines(repo, branch).then(function (list) {
+        if (list && mergeStatuses(list, Date.now() / 1000)) {
+          payloads = list; last = null; show(); schedule(); return;
+        }
         load(repo, branch).then(done).catch(fail);
       }).catch(function () { load(repo, branch).then(done).catch(fail); });
     }
     tick();
-    setInterval(function () { if (!document.hidden) tick(); }, POLL);
     setInterval(function () {  // keep the session timer and "updated" text current
-      if (last) render(root, last, hide);
+      var st = current();
+      if (st) render(root, st, hide);
     }, 30000);
   }
 
