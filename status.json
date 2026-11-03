@@ -2,9 +2,9 @@
  "v": 2,
  "schema_version": 2,
  "machine_id": "claude-backend",
- "updated": 1793683764,
- "published_at": "2026-11-03T05:29:24Z",
- "heartbeat_at": "2026-11-03T05:29:24Z",
+ "updated": 1793684359,
+ "published_at": "2026-11-03T05:39:19Z",
+ "heartbeat_at": "2026-11-03T05:39:19Z",
  "tracking_since": "2026-10-29",
  "machine_reachable": true,
  "human_active": "unknown",
@@ -44,7 +44,7 @@
    "os": "Muse backend · Linux VM",
    "os_full": "Muse backend (hosted Linux VM) — where Abel's Muse sessions run",
    "agents": 1,
-   "last_seen_at": "2026-11-03T05:29:24Z"
+   "last_seen_at": "2026-11-03T05:39:19Z"
   }
  ],
  "today": {},
@@ -62,7 +62,7 @@
   }
  ],
  "model": "Muse Spark",
- "last_active": "2026-11-03T05:28:52Z",
+ "last_active": "2026-11-03T05:37:35Z",
  "landing": "https://abelxmendoza.github.io/discord-agent-presence/",
  "state": "coding",
  "streak_source": "union",
