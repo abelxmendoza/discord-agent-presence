@@ -28,6 +28,9 @@ cp "$ROOT/ai_presence.py" "$ROOT/LICENSE" "$ROOT/macos/install_core.sh" "$RES/"
 chmod +x "$RES/install_core.sh"
 echo "$VER" >"$RES/VERSION"
 
+echo "==> login-service launcher (keeps macOS permissions across Python updates)"
+bash "$ROOT/macos/build_launcher.sh" "$RES" >/dev/null
+
 echo "==> psutil wheels (Apple silicon + Intel), so installs work offline"
 mkdir -p "$RES/wheels"
 for plat in macosx_11_0_arm64 macosx_10_9_x86_64; do

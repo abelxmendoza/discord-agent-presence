@@ -929,6 +929,49 @@ class Platform(unittest.TestCase):
         ap.cmd_setup(dry_run=True) if not ap.IS_LINUX or __import__("shutil").which("systemctl") else None
 
 
+class MacLaunchAgent(unittest.TestCase):
+    """The macOS login service runs Python through the launcher when it's
+    installed, so permissions survive Python updates; plain Python otherwise."""
+
+    def _plist(self, launcher):
+        import contextlib
+        import io
+        from unittest import mock
+        out = io.StringIO()
+        with mock.patch.object(ap, "IS_MAC", True), mock.patch.object(ap, "IS_LINUX", False), \
+                mock.patch.object(ap, "IS_WIN", False), mock.patch.object(ap, "MAC_LAUNCHER", launcher), \
+                contextlib.redirect_stdout(out):
+            ap.cmd_setup(dry_run=True)
+        text = out.getvalue()
+        return text[text.index("<?xml"):]
+
+    def test_uses_launcher_when_installed(self):
+        with tempfile.TemporaryDirectory() as d:
+            exe = Path(d) / "Agent Presence Agent.app" / "Contents" / "MacOS" / "agent-presence-agent"
+            exe.parent.mkdir(parents=True)
+            exe.write_text("#!/bin/sh\n")
+            exe.chmod(0o755)
+            plist = self._plist(exe)
+        import xml.etree.ElementTree as ET
+        args = [s.text for s in ET.fromstring(plist).find("dict").find("array")]
+        self.assertEqual(args, [str(exe), sys.executable, str(ap.SCRIPT), "run"])
+
+    def test_plain_python_without_launcher(self):
+        missing = Path(tempfile.gettempdir()) / "no-such-launcher" / "agent-presence-agent"
+        import xml.etree.ElementTree as ET
+        args = [s.text for s in ET.fromstring(self._plist(missing)).find("dict").find("array")]
+        self.assertEqual(args, [sys.executable, str(ap.SCRIPT), "run"])
+
+    def test_paths_are_xml_escaped(self):
+        with tempfile.TemporaryDirectory(suffix=" R&D <x>") as d:
+            exe = Path(d) / "agent-presence-agent"
+            exe.write_text("#!/bin/sh\n")
+            exe.chmod(0o755)
+            import xml.etree.ElementTree as ET
+            args = [s.text for s in ET.fromstring(self._plist(exe)).find("dict").find("array")]
+        self.assertEqual(args[0], str(exe))
+
+
 # ---------------------------------------------------------------- fake Discord
 
 def _frame(op, payload):

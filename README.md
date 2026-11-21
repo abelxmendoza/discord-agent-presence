@@ -96,10 +96,14 @@ git clone https://github.com/abelxmendoza/discord-agent-presence && ./discord-ag
 | Window detection | `xprop` (X11) | System Events (needs Accessibility\*) | Win32 API |
 | Logs | `journalctl --user -u ai-presence -f` | `~/Library/Logs/agent-presence.log` | `~\.local\state\ai-presence\agent-presence.log` |
 
-\* On macOS, allow Accessibility for Python under System Settings → Privacy &
-Security → Accessibility so it can read editor window titles. The Mac app's
-**Allow Window Titles…** button opens that page and copies the Python path for
-you. Without it everything else works; only projects that come from Cursor
+\* On macOS, allow Accessibility for **Agent Presence** under System Settings →
+Privacy & Security → Accessibility so it can read editor window titles. The
+Mac app's **Allow Window Titles…** button opens that page and copies the path
+for you. The login service runs Python through a small launcher app, *Agent
+Presence Agent*, so this permission stays put when Homebrew or python.org
+updates Python. (Installs without the launcher, for example a source install
+on a Mac without the Command Line Tools, ask for Python itself, and macOS asks
+again after each Python update.) Without it everything else works; only projects that come from Cursor
 or VS Code window titles are missed. `agent-presence doctor` tells you.
 
 ## What's on the card

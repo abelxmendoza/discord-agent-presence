@@ -3642,6 +3642,16 @@ UNIT_PATH = HOME / f".config/systemd/user/{SERVICE}.service"
 PLIST_LABEL = "com.agentpresence"
 PLIST_PATH = HOME / f"Library/LaunchAgents/{PLIST_LABEL}.plist"
 MAC_LOG = HOME / "Library/Logs/agent-presence.log"
+# Built next to the script by the Mac app and install.sh (macos/build_launcher.sh).
+# The login service runs Python through it so macOS keeps Accessibility and
+# Automation permissions when Python is updated.
+MAC_LAUNCHER_APP = SCRIPT.parent / "Agent Presence Agent.app"
+MAC_LAUNCHER = MAC_LAUNCHER_APP / "Contents" / "MacOS" / "agent-presence-agent"
+
+
+def mac_launcher():
+    """The launcher's path if it's installed and runnable, else None."""
+    return MAC_LAUNCHER if MAC_LAUNCHER.is_file() and os.access(MAC_LAUNCHER, os.X_OK) else None
 WIN_STARTUP = Path(os.environ.get("APPDATA", HOME / "AppData/Roaming")) / \
     "Microsoft/Windows/Start Menu/Programs/Startup/agent-presence.vbs"
 APP_BINARIES = {"claude": ["claude-desktop", "claude"], "chatgpt": ["chatgpt", "codex"],
@@ -3727,7 +3737,9 @@ def cmd_doctor():
         front = run("osascript", "-e", MAC_SCRIPT)
         print(f"{ok(front)} window detection (System Events)")
         if front and "\t\n" in front.split("\n", 1)[0] + "\n":
-            print("  ! no window titles: allow Accessibility for your terminal / Python in"
+            who = (f"Agent Presence ({MAC_LAUNCHER_APP})" if mac_launcher()
+                   else "your terminal / Python")
+            print(f"  ! no window titles: allow Accessibility for {who} in"
                   " System Settings → Privacy & Security → Accessibility")
     ipc = None
     for path in ipc_paths():
@@ -3790,13 +3802,17 @@ Environment=DISPLAY={os.environ.get('DISPLAY', ':0')}
 WantedBy=graphical-session.target
 """
     elif IS_MAC:
+        from xml.sax.saxutils import escape
+        launcher = mac_launcher()
+        prog = ([str(launcher)] if launcher else []) + [py, str(SCRIPT), "run"]
+        args = "".join(f"<string>{escape(a)}</string>" for a in prog)
         target, body = PLIST_PATH, f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key><string>{PLIST_LABEL}</string>
   <key>ProgramArguments</key>
-  <array><string>{py}</string><string>{SCRIPT}</string><string>run</string></array>
+  <array>{args}</array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ProcessType</key><string>Interactive</string>

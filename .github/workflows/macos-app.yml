@@ -45,6 +45,16 @@ jobs:
           ~/.local/bin/agent-presence doctor
           ~/.local/bin/agent-presence setup --dry-run
           "$CORE" python-path
+          # Launcher: built, signed, installed, used by the login service, passes exit codes through
+          AGENT="dist/Agent Presence.app/Contents/Resources/Agent Presence Agent.app"
+          codesign --verify --strict "$AGENT"
+          codesign -dv "$AGENT" 2>&1 | grep -q "Identifier=com.agentpresence.agent"
+          INSTALLED="$HOME/Library/Application Support/Agent Presence/Agent Presence Agent.app"
+          test -x "$INSTALLED/Contents/MacOS/agent-presence-agent"
+          test "$("$CORE" permission-path)" = "$INSTALLED"
+          ~/.local/bin/agent-presence setup --dry-run | grep -q "agent-presence-agent</string>"
+          set +e; "$INSTALLED/Contents/MacOS/agent-presence-agent" /bin/sh -c 'exit 7'; rc=$?; set -e
+          test "$rc" = 7
           KEY="$("$CORE" link-key)"
           test -n "$KEY" && test "$("$CORE" link-key)" = "$KEY"
           "$CORE" uninstall

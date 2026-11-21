@@ -118,13 +118,13 @@ end finish
 on allowTitles(core, myIcon)
 	set py to ""
 	try
-		set py to do shell script core & " python-path"
+		set py to do shell script core & " permission-path"
 	end try
 	if py is not "" then set the clipboard to py
 	set msg to "In the window that opens:" & return & return & ¬
 		"1. Click + at the bottom of the list (enter your password if asked)." & return & ¬
 		"2. Press ⌘⇧G, paste with ⌘V, and press Return." & return & ¬
-		"3. Click Open and make sure the new Python switch is on." & return & return & ¬
+		"3. Click Open and make sure its new switch is on." & return & return & ¬
 		"The path is already copied:" & return & py
 	display dialog msg with title appTitle buttons {"Open Settings"} default button "Open Settings" with icon myIcon
 	open location "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
