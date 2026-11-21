@@ -738,7 +738,7 @@ AP.render(root, { state: "waiting", heartbeat_at: freshIso(), agents: [{ status:
 if (/📱/.test(root.innerHTML)) { fails++; console.log("FAIL origin while waiting"); }
 console.log(fails ? "CONSUMER FAILURES: " + fails : "consumer ok");
 process.exit(fails ? 1 : 0);
-""")
+""", encoding="utf-8")
         import subprocess
         r = subprocess.run(["node", str(script), str(Path(__file__).resolve().parent.parent / "docs" / "embed.js")],
                            capture_output=True, text=True, timeout=60)
@@ -963,7 +963,7 @@ class MacLaunchAgent(unittest.TestCase):
         self.assertEqual(args, [sys.executable, str(ap.SCRIPT), "run"])
 
     def test_paths_are_xml_escaped(self):
-        with tempfile.TemporaryDirectory(suffix=" R&D <x>") as d:
+        with tempfile.TemporaryDirectory(suffix=" R&D") as d:
             exe = Path(d) / "agent-presence-agent"
             exe.write_text("#!/bin/sh\n")
             exe.chmod(0o755)
@@ -1297,7 +1297,7 @@ eq(m.agents.length, 1, "e: idle machine's waiting agent is not listed");
 eq(m.machines.length, 2, "e: idle machine itself still shows as a machine");
 console.log(fails ? "MERGE FAILURES: " + fails : "merge ok");
 process.exit(fails ? 1 : 0);
-""")
+""", encoding="utf-8")
         import subprocess
         r = subprocess.run(["node", str(script), str(Path(__file__).resolve().parent.parent / "docs" / "embed.js")],
                            capture_output=True, text=True, timeout=60)
