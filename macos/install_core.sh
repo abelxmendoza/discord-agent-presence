@@ -7,6 +7,7 @@
 #     (or the steps one at a time: files, runtime, service)
 #   install_core.sh uninstall
 #   install_core.sh python-path         the Python binary the login service runs
+#   install_core.sh permission-path     what to allow under Privacy & Security
 #   install_core.sh web [--readme] [--token-file <f>]
 #                                       publish to your GitHub profile, then restart
 #   install_core.sh link-key            this computer's link key (made if needed)
@@ -54,6 +55,15 @@ step_files() {
   cp "$RES/ai_presence.py" "$DEST/ai_presence.py"
   cp "$RES/VERSION" "$DEST/VERSION"
   [ -f "$RES/LICENSE" ] && cp "$RES/LICENSE" "$DEST/LICENSE"
+  # The login service runs Python through this launcher so macOS ties window
+  # permissions to it instead of to a Python that changes with every update.
+  # Replace it only when it changed, so its permissions survive app updates.
+  local agent="Agent Presence Agent.app" exe="Contents/MacOS/agent-presence-agent"
+  if [ -d "$RES/$agent" ] && ! cmp -s "$RES/$agent/$exe" "$DEST/$agent/$exe"; then
+    rm -rf "$DEST/$agent"
+    ditto "$RES/$agent" "$DEST/$agent"
+    note "launcher updated"
+  fi
   return 0
 }
 
@@ -163,9 +173,16 @@ case "${1:-}" in
     step_files
     tool link "$2" >/dev/null
     step_service ;;
+  permission-path)
+    # What to allow under Privacy & Security: the launcher when installed.
+    if [ -d "$DEST/Agent Presence Agent.app" ]; then
+      echo "$DEST/Agent Presence Agent.app"
+    else
+      "$0" python-path
+    fi ;;
   python-path)
     "$VENV_PY" -c 'import os, sys; print(os.path.realpath(sys._base_executable if hasattr(sys, "_base_executable") else sys.executable))' ;;
   *)
-    echo "usage: $0 status|install [--skip-service]|files|runtime|service|uninstall|python-path|web [--readme] [--token-file <f>]|link-key|link <key>" >&2
+    echo "usage: $0 status|install [--skip-service]|files|runtime|service|uninstall|python-path|permission-path|web [--readme] [--token-file <f>]|link-key|link <key>" >&2
     exit 2 ;;
 esac

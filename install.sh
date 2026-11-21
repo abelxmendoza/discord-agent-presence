@@ -29,6 +29,11 @@ if [ "$OS" = "Darwin" ]; then
   python3 -m venv "$DEST/.venv"
   "$DEST/.venv/bin/python" -m pip install -q --upgrade pip psutil
   PY="$DEST/.venv/bin/python"
+  # A launcher keeps the window permission when Python updates (see macos/launcher.c).
+  if xcode-select -p >/dev/null 2>&1 && [ -f "$DEST/macos/build_launcher.sh" ]; then
+    bash "$DEST/macos/build_launcher.sh" "$DEST" >/dev/null \
+      || echo "note: couldn't build the launcher; macOS will ask again for permissions after Python updates"
+  fi
 fi
 
 mkdir -p "$BIN"
